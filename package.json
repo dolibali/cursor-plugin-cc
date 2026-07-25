@@ -1,0 +1,14 @@
+{
+  "name": "cursor-plugin-cc",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Delegate tasks to local Cursor Agent CLI from Codex or Claude Code.",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "test": "node --test tests/companion.test.mjs",
+    "install-skills": "bash scripts/install-skills.sh"
+  }
+}

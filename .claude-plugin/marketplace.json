@@ -1,0 +1,21 @@
+{
+  "name": "dolibali-cursor",
+  "owner": {
+    "name": "dolibali"
+  },
+  "metadata": {
+    "description": "Cursor Agent CLI plugins for Claude Code delegation.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "cursor",
+      "description": "Use local Cursor Agent CLI from Claude Code to delegate tasks.",
+      "version": "0.2.0",
+      "author": {
+        "name": "dolibali"
+      },
+      "source": "./plugins/cursor"
+    }
+  ]
+}
