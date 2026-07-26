@@ -1,14 +1,17 @@
 {
   "name": "cursor-plugin-cc",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Delegate tasks to local Cursor Agent CLI from Codex or Claude Code.",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18.0"
   },
   "scripts": {
-    "test": "node --test tests/companion.test.mjs",
-    "install-skills": "bash scripts/install-skills.sh"
+    "test": "node --test tests/*.test.mjs",
+    "test:live:codex": "node scripts/live-smoke-codex.mjs",
+    "install-skills": "bash scripts/install-skills.sh",
+    "uninstall-skills": "bash scripts/uninstall-skills.sh"
   }
 }

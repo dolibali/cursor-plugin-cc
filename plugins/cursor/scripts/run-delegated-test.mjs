@@ -18,6 +18,8 @@ import {
 } from "node:fs/promises"
 import path from "node:path"
 
+import { isSystemTemporaryPath } from "./lib/system-temp.mjs"
+
 const DEFAULT_MODEL = null // leave unset → Cursor CLI auto
 const DEFAULT_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000
@@ -25,6 +27,7 @@ const DEFAULT_LONG_COMMAND_TIMEOUT_MS = 30 * 60 * 1000
 const HEARTBEAT_MS = 30 * 1000
 const PROCESS_GUARD_MS = 10 * 1000
 const TERMINATE_GRACE_MS = 10 * 1000
+const SHELL_FAILURE_LIMIT = 3
 const CHECK_STATUSES = new Set(["PASS", "FAIL", "BLOCKED", "SKIP"])
 const REPAIR_STATUSES = new Set(["NONE", "APPLIED_AND_VERIFIED", "ESCALATION_REQUIRED"])
 const MEANINGFUL_PROGRESS_KINDS = new Set([
@@ -38,7 +41,8 @@ const EXIT_CODES = { PASS: 0, FAIL: 2, BLOCKED: 3, PARTIAL: 4 }
 
 function usage() {
   return `Usage:
-  run-delegated-test.mjs --workspace <path> --prompt-file <path> --artifact-dir <path>
+  run-delegated-test.mjs --workspace <path> [--add-dir <path>]...
+    --prompt-file <path> --artifact-dir <path> [--sandbox enabled|disabled]
     [--required-check <id>]... [--optional-check <id>]...
     [--model <slug>] [--timeout-ms <ms>]
     [--no-progress-timeout-ms <ms>] [--long-command-timeout-ms <ms>]
@@ -54,6 +58,7 @@ function parsePositiveInteger(value, flag) {
 function parseArgs(argv) {
   const result = {
     workspace: "",
+    addDirs: [],
     promptFile: "",
     artifactDir: "",
     model: DEFAULT_MODEL, // null unless --model
@@ -63,6 +68,7 @@ function parseArgs(argv) {
     agentBin: "agent",
     requiredChecks: [],
     optionalChecks: [],
+    sandbox: "enabled",
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
@@ -71,6 +77,9 @@ function parseArgs(argv) {
     switch (flag) {
       case "--workspace":
         result.workspace = value
+        break
+      case "--add-dir":
+        result.addDirs.push(value)
         break
       case "--prompt-file":
         result.promptFile = value
@@ -93,6 +102,9 @@ function parseArgs(argv) {
       case "--agent-bin":
         result.agentBin = value
         break
+      case "--sandbox":
+        result.sandbox = value
+        break
       case "--required-check":
         result.requiredChecks.push(value)
         break
@@ -113,6 +125,9 @@ function parseArgs(argv) {
   }
   result.requiredChecks = [...new Set(result.requiredChecks)]
   result.optionalChecks = [...new Set(result.optionalChecks)]
+  if (result.sandbox !== "enabled" && result.sandbox !== "disabled") {
+    throw new Error("--sandbox must be enabled or disabled")
+  }
   const overlappingCheck = result.requiredChecks.find((id) => result.optionalChecks.includes(id))
   if (overlappingCheck) throw new Error(`Check cannot be both required and optional: ${overlappingCheck}`)
   result.timeoutMs ??= DEFAULT_TIMEOUT_MS
@@ -215,8 +230,9 @@ function shellQuote(value) {
 async function createRecursionGuard(artifactDir) {
   const guardDir = path.join(artifactDir, ".delegation-guard-bin")
   const attemptsPath = path.join(artifactDir, "recursion-attempts.log")
+  const detachedAttemptsPath = path.join(artifactDir, "detached-process-attempts.log")
   await mkdir(guardDir, { recursive: true })
-  await writeFile(attemptsPath, "")
+  await Promise.all([writeFile(attemptsPath, ""), writeFile(detachedAttemptsPath, "")])
   const script = `#!/bin/sh
 printf '%s\\n' "Nested Cursor delegation blocked: delegated workers must execute the task directly." >&2
 printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_RECURSION_ATTEMPT_LOG"
@@ -227,7 +243,35 @@ exit 126
     await writeFile(target, script)
     await chmod(target, 0o755)
   }
-  return { guardDir, attemptsPath }
+  const detachedScript = `#!/bin/sh
+printf '%s\\n' "Detached process launch blocked: delegated workers must keep child processes attached." >&2
+printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_DETACHED_ATTEMPT_LOG"
+exit 126
+`
+  for (const name of ["nohup", "setsid", "systemd-run"]) {
+    const target = path.join(guardDir, name)
+    await writeFile(target, detachedScript)
+    await chmod(target, 0o755)
+  }
+  if (process.platform === "darwin") {
+    const realLaunchctl = await resolveExecutable("launchctl")
+    const launchctlScript = `#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    submit|bootstrap|load|kickstart)
+      printf '%s\\n' "Detached launchctl operation blocked: $argument" >&2
+      printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_DETACHED_ATTEMPT_LOG"
+      exit 126
+      ;;
+  esac
+done
+exec ${shellQuote(realLaunchctl)} "$@"
+`
+    const target = path.join(guardDir, "launchctl")
+    await writeFile(target, launchctlScript)
+    await chmod(target, 0o755)
+  }
+  return { guardDir, attemptsPath, detachedAttemptsPath }
 }
 
 async function createGitGuard(artifactDir, guardDir, realGitBin) {
@@ -274,6 +318,50 @@ async function recursionAttemptCount(attemptsPath) {
   } catch {
     return 0
   }
+}
+
+function taskToolCallPresent(toolCall) {
+  return Boolean(
+    toolCall
+    && typeof toolCall === "object"
+    && Object.keys(toolCall).some((key) => key.toLowerCase() === "tasktoolcall"),
+  )
+}
+
+function shellToolCall(toolCall) {
+  if (!toolCall || typeof toolCall !== "object") return null
+  const entry = Object.entries(toolCall).find(([key]) => key.toLowerCase() === "shelltoolcall")
+  return entry?.[1] && typeof entry[1] === "object" ? entry[1] : null
+}
+
+function isNoExitStatusFailure(shellCall) {
+  const error = shellCall?.result?.spawnError?.error
+  return typeof error === "string" && /returned no exit status/i.test(error)
+}
+
+function prohibitedDetachedCommand(shellCall) {
+  const args = shellCall?.args
+  if (!args || typeof args !== "object") return null
+  const simpleCommands = Array.isArray(args.simpleCommands)
+    ? args.simpleCommands.map((command) => String(command).toLowerCase())
+    : []
+  const command = typeof args.command === "string" ? args.command : ""
+  for (const binary of ["nohup", "setsid", "systemd-run"]) {
+    if (simpleCommands.includes(binary)) return binary
+  }
+  if (
+    simpleCommands.includes("launchctl")
+    && /\blaunchctl\b[\s\S]{0,200}\b(submit|bootstrap|load|kickstart)\b/i.test(command)
+  ) {
+    return "launchctl"
+  }
+  if (simpleCommands.includes("disown") || /(?:^|[;&|\n]\s*)disown(?:\s|$)/i.test(command)) {
+    return "disown"
+  }
+  if (simpleCommands.includes("start-process") || /\bStart-Process\b/i.test(command)) {
+    return "Start-Process"
+  }
+  return null
 }
 
 async function gitGuardAttemptCount(attemptsPath) {
@@ -704,6 +792,7 @@ function contractPrompt({
   requiredChecks,
   optionalChecks,
   workerProgressFile,
+  workspaceRoots,
 }) {
   const required = requiredChecks.length > 0 ? requiredChecks.map((item) => `- ${item}`).join("\n") : "- supplied by task prompt"
   const optional = optionalChecks.length > 0 ? optionalChecks.map((item) => `- ${item}`).join("\n") : "- none"
@@ -714,10 +803,11 @@ function contractPrompt({
 You are the single autonomous test and repair worker for this run. Follow this generic contract:
 
 1. Test the requested behavior and do not redesign product expectations.
-2. You may edit production code, tests, fixtures, and test infrastructure inside the current workspace.
+2. You may edit production code, tests, fixtures, and test infrastructure only inside these declared workspaces:
+${workspaceRoots.map((root) => `   - ${root}`).join("\n")}
 3. Continue diagnosing, repairing, and rerunning from the earliest affected phase while you are making meaningful progress.
 4. Do not delegate to another Cursor CLI worker, invoke agent/cursor-agent/Cursor SDK, or run this delegated-test runner.
-5. Do not commit, push, reset, checkout, clean, rebase, stash, or edit another repository.
+5. Do not commit, push, reset, checkout, clean, rebase, stash, or edit any undeclared repository.
 6. Never weaken an assertion or locator to hide broken product behavior.
 7. Clean up only resources created by this delegated run.
 
@@ -812,14 +902,17 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     "-p",
     "--trust",
     "--force",
+    "--sandbox",
+    config.sandbox,
     "--output-format",
     "stream-json",
     "--stream-partial-output",
     ...(config.model ? ["--model", config.model] : []),
     "--workspace",
     workspace,
-    prompt,
   ]
+  for (const directory of config.addDirs) args.push("--add-dir", directory)
+  args.push(prompt)
   const startedAt = Date.now()
   let lastActivityAt = startedAt
   let closed = false
@@ -834,6 +927,8 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     activeLongCommand: null,
     blockedAttempts: 0,
     blockedGitAttempts: 0,
+    blockedDetachedAttempts: 0,
+    shellFailureCount: 0,
     killedNestedPids: new Set(),
   }
   const writeQueues = new Map([
@@ -852,6 +947,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     )
     return progressQueue
   }
+  let terminate = async () => {}
   const inspectStreamLine = (line) => {
     try {
       const event = JSON.parse(line)
@@ -863,8 +959,46 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
           cacheWriteTokens: Number(event.usage.cacheWriteTokens) || 0,
         }
       }
-      if (event.type !== "tool_call" || event.subtype !== "started") return
+      if (event.type !== "tool_call") return
       const toolCall = event.tool_call
+      if (event.subtype === "started" && taskToolCallPresent(toolCall)) {
+        autonomousState.blockedAttempts += 1
+        enqueueProgress({
+          type: "runner.recursionBlocked",
+          source: "task-tool-call",
+          attempts: autonomousState.blockedAttempts,
+        }).catch(() => {})
+        terminate("RECURSIVE_DELEGATION_TOOL_CALL").catch(() => {})
+        return
+      }
+      const shellCall = shellToolCall(toolCall)
+      if (event.subtype === "completed" && shellCall?.result) {
+        if (isNoExitStatusFailure(shellCall)) {
+          autonomousState.shellFailureCount += 1
+          enqueueProgress({
+            type: "runner.shellUnavailable",
+            consecutiveFailures: autonomousState.shellFailureCount,
+          }).catch(() => {})
+          if (autonomousState.shellFailureCount >= SHELL_FAILURE_LIMIT) {
+            terminate("WORKER_SHELL_UNAVAILABLE").catch(() => {})
+          }
+        } else {
+          autonomousState.shellFailureCount = 0
+        }
+      }
+      if (event.subtype !== "started") return
+      const detachedCommand = prohibitedDetachedCommand(shellCall)
+      if (detachedCommand) {
+        autonomousState.blockedDetachedAttempts += 1
+        enqueueProgress({
+          type: "runner.detachedProcessBlocked",
+          source: "stream",
+          command: detachedCommand,
+          attempts: autonomousState.blockedDetachedAttempts,
+        }).catch(() => {})
+        terminate("PROHIBITED_DETACHED_PROCESS").catch(() => {})
+        return
+      }
       const nestedToolCall = toolCall && typeof toolCall === "object"
         ? Object.entries(toolCall).find(
             ([key, value]) =>
@@ -889,8 +1023,12 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   })
+  const handleSigint = () => terminate("PARENT_SIGINT").catch(() => {})
+  const handleSigterm = () => terminate("PARENT_SIGTERM").catch(() => {})
+  process.once("SIGINT", handleSigint)
+  process.once("SIGTERM", handleSigterm)
 
-  const terminate = async (reason) => {
+  terminate = async (reason) => {
     if (closed || timedOut) return
     timedOut = reason
     await enqueueProgress({ type: "runner.terminate", reason })
@@ -990,6 +1128,20 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       }
       if (autonomousState.blockedAttempts > 1) await terminate("RECURSIVE_DELEGATION_REPEATED")
 
+      const detachedAttempts = await recursionAttemptCount(
+        config.recursionGuard.detachedAttemptsPath,
+      )
+      if (detachedAttempts > autonomousState.blockedDetachedAttempts) {
+        autonomousState.blockedDetachedAttempts = detachedAttempts
+        await enqueueProgress({
+          type: "runner.detachedProcessBlocked",
+          source: "path",
+          attempts: detachedAttempts,
+        })
+        await terminate("PROHIBITED_DETACHED_PROCESS")
+        return
+      }
+
       const blockedGitAttempts = await gitGuardAttemptCount(config.workspaceGuard.attemptsPath)
       if (blockedGitAttempts > autonomousState.blockedGitAttempts) {
         autonomousState.blockedGitAttempts = blockedGitAttempts
@@ -1014,11 +1166,17 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   clearInterval(heartbeatMonitor)
   clearInterval(guardMonitor)
   clearTimeout(terminationTimer)
+  process.off("SIGINT", handleSigint)
+  process.off("SIGTERM", handleSigterm)
   if (stdoutBuffer) inspectStreamLine(stdoutBuffer)
   await readWorkerProgress(workerProgressPath, autonomousState, config, enqueueProgress)
   autonomousState.blockedAttempts = Math.max(
     autonomousState.blockedAttempts,
     await recursionAttemptCount(config.recursionGuard.attemptsPath),
+  )
+  autonomousState.blockedDetachedAttempts = Math.max(
+    autonomousState.blockedDetachedAttempts,
+    await recursionAttemptCount(config.recursionGuard.detachedAttemptsPath),
   )
   autonomousState.blockedGitAttempts = Math.max(
     autonomousState.blockedGitAttempts,
@@ -1049,11 +1207,29 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       depth: 1,
       blockedAttempts: autonomousState.blockedAttempts,
     },
+    executionGuard: {
+      blockedDetachedAttempts: autonomousState.blockedDetachedAttempts,
+      consecutiveShellFailures: autonomousState.shellFailureCount,
+    },
     workspaceGuard: {
       blockedAttempts: autonomousState.blockedGitAttempts,
     },
     usage,
   }
+}
+
+async function normalizeWorkspaceRoots(primary, additional) {
+  const roots = []
+  for (const candidate of [primary, ...additional]) {
+    if (!path.isAbsolute(candidate)) throw new Error(`Workspace path must be absolute: ${candidate}`)
+    const workspace = await realpath(path.resolve(candidate))
+    if (roots.includes(workspace)) continue
+    const workspaceInfo = await stat(workspace)
+    if (!workspaceInfo.isDirectory()) throw new Error(`Workspace is not a directory: ${workspace}`)
+    await git(workspace, ["rev-parse", "--is-inside-work-tree"])
+    roots.push(workspace)
+  }
+  return roots
 }
 
 async function main() {
@@ -1067,22 +1243,24 @@ async function main() {
   config.realGitBin = await resolveExecutable("git")
   config.agentIdentityPaths = [...new Set([path.resolve(requestedAgentBin), config.resolvedAgentBin])]
   config.runId = randomUUID()
-  const workspace = await realpath(path.resolve(config.workspace))
-  const workspaceInfo = await stat(workspace)
-  if (!workspaceInfo.isDirectory()) throw new Error(`Workspace is not a directory: ${workspace}`)
-  await git(workspace, ["rev-parse", "--is-inside-work-tree"])
+  const workspaceRoots = await normalizeWorkspaceRoots(config.workspace, config.addDirs)
+  const [workspace, ...addDirs] = workspaceRoots
+  config.addDirs = addDirs
 
   const promptFile = await realpath(path.resolve(config.promptFile))
   const taskPrompt = await readFile(promptFile, "utf8")
   const requestedArtifactDir = path.resolve(config.artifactDir)
   const existingArtifactParent = await realpath(await nearestExistingPath(requestedArtifactDir))
-  if (existingArtifactParent === workspace || isInside(workspace, existingArtifactParent)) {
-    throw new Error("Artifact directory must be outside the workspace")
+  if (!isSystemTemporaryPath(existingArtifactParent)) {
+    throw new Error("Artifact directory must be under the system temporary directory")
+  }
+  if (workspaceRoots.some((root) => existingArtifactParent === root || isInside(root, existingArtifactParent))) {
+    throw new Error("Artifact directory must be outside every workspace")
   }
   await mkdir(requestedArtifactDir, { recursive: true })
   const artifactDir = await realpath(requestedArtifactDir)
-  if (artifactDir === workspace || isInside(workspace, artifactDir)) {
-    throw new Error("Artifact directory must be outside the workspace")
+  if (workspaceRoots.some((root) => artifactDir === root || isInside(root, artifactDir))) {
+    throw new Error("Artifact directory must be outside every workspace")
   }
   await Promise.all(
     ["agent-result.json", "run-result.json", "attempted-repair.patch"].map((name) =>
@@ -1100,14 +1278,32 @@ async function main() {
   const afterSnapshotDir = path.join(artifactDir, ".source-after")
   await rm(beforeSnapshotDir, { recursive: true, force: true })
   await rm(afterSnapshotDir, { recursive: true, force: true })
-  const before = await workspaceFingerprint(workspace)
-  const repositoryGuardBefore = await repositoryGuardState(workspace)
-  await snapshotRecordPaths(workspace, before.records.map(({ path: relativePath }) => relativePath), beforeSnapshotDir)
+  const beforeWorkspaces = await Promise.all(
+    workspaceRoots.map(async (root, index) => {
+      const fingerprint = await workspaceFingerprint(root)
+      const repository = await repositoryGuardState(root)
+      await snapshotRecordPaths(
+        root,
+        fingerprint.records.map(({ path: relativePath }) => relativePath),
+        path.join(beforeSnapshotDir, `root-${index}`),
+      )
+      return { workspace: root, fingerprint, repository }
+    }),
+  )
+  const before = beforeWorkspaces[0].fingerprint
+  const repositoryGuardBefore = beforeWorkspaces[0].repository
+  const combinedSourceFingerprint = createHash("sha256")
+    .update(JSON.stringify(beforeWorkspaces.map(({ workspace: root, fingerprint }) => [root, fingerprint.digest])))
+    .digest("hex")
 
   const delegation = {
     schemaVersion: 1,
     startedAt: new Date().toISOString(),
     workspace,
+    workspaceRoots,
+    sandbox: config.sandbox,
+    hostAccess: config.sandbox === "disabled" ? "unrestricted" : "workspace",
+    filesystemBoundaryVerified: config.sandbox === "enabled",
     promptFile,
     artifactDir,
     runId: config.runId,
@@ -1119,6 +1315,7 @@ async function main() {
     requiredChecks: config.requiredChecks,
     optionalChecks: config.optionalChecks,
     source: before,
+    sources: beforeWorkspaces,
     workspaceGuard: {
       repository: repositoryGuardBefore,
       blockedAttempts: 0,
@@ -1129,10 +1326,11 @@ async function main() {
   const prompt = contractPrompt({
     taskPrompt,
     artifactDir,
-    sourceFingerprint: before.digest,
+    sourceFingerprint: combinedSourceFingerprint,
     requiredChecks: config.requiredChecks,
     optionalChecks: config.optionalChecks,
     workerProgressFile: path.join(artifactDir, "worker-progress.jsonl"),
+    workspaceRoots,
   })
   const processResult = await runAgent({
     config,
@@ -1143,28 +1341,70 @@ async function main() {
       ...process.env,
       DELEGATED_TEST_ARTIFACT_DIR: artifactDir,
       DELEGATED_TEST_WORKSPACE: workspace,
+      DELEGATED_TEST_WORKSPACES: JSON.stringify(workspaceRoots),
       DELEGATED_TEST_PROGRESS_FILE: path.join(artifactDir, "worker-progress.jsonl"),
       CURSOR_DELEGATED_WORKER: "1",
       CURSOR_DELEGATION_DEPTH: "1",
       CURSOR_DELEGATION_RUN_ID: config.runId,
       CURSOR_RECURSION_ATTEMPT_LOG: config.recursionGuard.attemptsPath,
+      CURSOR_DETACHED_ATTEMPT_LOG: config.recursionGuard.detachedAttemptsPath,
       CURSOR_GIT_GUARD_ATTEMPT_LOG: config.workspaceGuard.attemptsPath,
       PATH: `${config.recursionGuard.guardDir}${path.delimiter}${process.env.PATH ?? ""}`,
     },
   })
 
-  const after = await workspaceFingerprint(workspace)
-  const repositoryGuardAfter = await repositoryGuardState(workspace)
+  const afterWorkspaces = await Promise.all(
+    workspaceRoots.map(async (root) => ({
+      workspace: root,
+      fingerprint: await workspaceFingerprint(root),
+      repository: await repositoryGuardState(root),
+    })),
+  )
+  const after = afterWorkspaces[0].fingerprint
+  const repositoryGuardAfter = afterWorkspaces[0].repository
+  const guardedWorkspaces = beforeWorkspaces.map((entry, index) => {
+    const next = afterWorkspaces[index]
+    const violations = repositoryGuardViolations(entry.repository, next.repository)
+    return {
+      workspace: entry.workspace,
+      before: entry.repository,
+      after: next.repository,
+      violations,
+    }
+  })
   const workspaceGuard = {
     blockedAttempts: processResult.workspaceGuard.blockedAttempts,
     before: repositoryGuardBefore,
     after: repositoryGuardAfter,
-    violations: repositoryGuardViolations(repositoryGuardBefore, repositoryGuardAfter),
+    workspaces: guardedWorkspaces,
+    violations: guardedWorkspaces.flatMap(({ workspace: root, violations }, index) =>
+      violations.map((violation) => index === 0 ? violation : `${root}:${violation}`),
+    ),
   }
-  const sourceChanges = changedRecordPaths(before.records, after.records)
-  const unsafeChangedSymlinks = await findUnsafeChangedSymlinks(workspace, sourceChanges)
-  await materializeCleanBaselines(workspace, before.records, sourceChanges, beforeSnapshotDir)
-  await snapshotRecordPaths(workspace, sourceChanges, afterSnapshotDir)
+  const sourceWorkspaces = []
+  for (let index = 0; index < beforeWorkspaces.length; index += 1) {
+    const previous = beforeWorkspaces[index]
+    const next = afterWorkspaces[index]
+    const changes = changedRecordPaths(previous.fingerprint.records, next.fingerprint.records)
+    const unsafeChangedSymlinks = await findUnsafeChangedSymlinks(previous.workspace, changes)
+    const beforeRoot = path.join(beforeSnapshotDir, `root-${index}`)
+    const afterRoot = path.join(afterSnapshotDir, `root-${index}`)
+    await materializeCleanBaselines(previous.workspace, previous.fingerprint.records, changes, beforeRoot)
+    await snapshotRecordPaths(previous.workspace, changes, afterRoot)
+    sourceWorkspaces.push({
+      workspace: previous.workspace,
+      before: previous.fingerprint,
+      after: next.fingerprint,
+      changes,
+      unsafeChangedSymlinks,
+    })
+  }
+  const sourceChanges = sourceWorkspaces.flatMap(({ workspace: root, changes }) =>
+    changes.map((relativePath) => ({ workspace: root, path: relativePath })),
+  )
+  const unsafeChangedSymlinks = sourceWorkspaces.flatMap(({ workspace: root, unsafeChangedSymlinks: paths }) =>
+    paths.map((relativePath) => ({ workspace: root, path: relativePath })),
+  )
   const repairPatch = sourceChanges.length > 0
     ? await createRepairPatch(artifactDir, beforeSnapshotDir, afterSnapshotDir)
     : null
@@ -1214,11 +1454,17 @@ async function main() {
       after,
       changes: sourceChanges,
       unsafeChangedSymlinks,
+      workspaces: sourceWorkspaces,
     },
+    workspaceRoots,
+    sandbox: config.sandbox,
+    hostAccess: config.sandbox === "disabled" ? "unrestricted" : "workspace",
+    filesystemBoundaryVerified: config.sandbox === "enabled",
     attemptedRepairPatch: repairPatch,
     repair,
     progress: processResult.progress,
     recursionGuard: processResult.recursionGuard,
+    executionGuard: processResult.executionGuard,
     workspaceGuard,
     escalation:
       agentResult?.escalation ??

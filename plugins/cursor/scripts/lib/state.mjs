@@ -31,7 +31,7 @@ export function loadGlobalConfig() {
 
 export function saveGlobalConfig(config) {
   fs.mkdirSync(companionHomeDir(), { recursive: true })
-  fs.writeFileSync(resolveGlobalConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8")
+  writeJsonAtomic(resolveGlobalConfigPath(), config)
 }
 
 export function resolveStateDir(cwd) {
@@ -84,7 +84,7 @@ function pruneJobs(jobs) {
 export function saveState(cwd, state) {
   ensureStateDir(cwd)
   const next = { version: STATE_VERSION, jobs: pruneJobs(state.jobs ?? []) }
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(next, null, 2)}\n`, "utf8")
+  writeJsonAtomic(resolveStateFile(cwd), next)
   return next
 }
 
@@ -104,7 +104,7 @@ export function resolveJobFile(cwd, jobId) {
 
 export function writeJobFile(cwd, job) {
   ensureStateDir(cwd)
-  fs.writeFileSync(resolveJobFile(cwd, job.id), `${JSON.stringify(job, null, 2)}\n`, "utf8")
+  writeJsonAtomic(resolveJobFile(cwd, job.id), job)
 }
 
 export function readJobFile(cwd, jobId) {
@@ -119,16 +119,29 @@ export function readJobFile(cwd, jobId) {
 
 export function upsertJob(cwd, job) {
   const now = new Date().toISOString()
-  const nextJob = { ...job, updatedAt: now, createdAt: job.createdAt ?? now }
-  updateState(cwd, (state) => {
-    const index = state.jobs.findIndex((item) => item.id === nextJob.id)
-    if (index >= 0) state.jobs[index] = { ...state.jobs[index], ...nextJob }
-    else state.jobs.unshift(nextJob)
-  })
+  const existing = readJobFile(cwd, job.id) ?? {}
+  const nextJob = { ...existing, ...job, updatedAt: now, createdAt: job.createdAt ?? existing.createdAt ?? now }
   writeJobFile(cwd, nextJob)
   return nextJob
 }
 
 export function listJobs(cwd) {
-  return loadState(cwd).jobs
+  const legacy = loadState(cwd).jobs
+  const byId = new Map(legacy.map((job) => [job.id, job]))
+  const jobsDir = resolveJobsDir(cwd)
+  if (fs.existsSync(jobsDir)) {
+    for (const entry of fs.readdirSync(jobsDir)) {
+      if (!entry.endsWith(".json")) continue
+      const job = readJobFile(cwd, entry.slice(0, -5))
+      if (job?.id) byId.set(job.id, job)
+    }
+  }
+  return pruneJobs([...byId.values()])
+}
+
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8")
+  fs.renameSync(temporary, file)
 }

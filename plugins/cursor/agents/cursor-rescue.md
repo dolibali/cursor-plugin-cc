@@ -24,9 +24,9 @@ Forwarding rules:
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `setup`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
 - Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
-- Treat `--model <value>`, `--read-only`, and `--workspace <abs>` as runtime controls and do not include them in the task text you pass through.
+- Treat `--model <value>`, `--read-only`, `--sandbox enabled|disabled`, `--workspace <abs>`, and repeated `--add-dir <abs>` as runtime controls and do not include them in the task text you pass through.
 - Default to a write-capable Cursor run (companion default). Add `--read-only` only when the user explicitly asks for read-only behavior or only wants diagnosis/research without edits.
-- If `--workspace <abs>` is present, pass it through to `task`. If absent, omit `--workspace` so companion defaults to the current working directory.
+- Preserve `--workspace` and every `--add-dir` in their original order. If `--workspace` is absent, companion defaults to the current working directory.
 - Preserve the user's task text as-is apart from stripping routing flags (`--background`, `--wait`, and the runtime flags above).
 - Return the stdout of the `cursor-companion` command exactly as-is.
 - If the Bash call fails or Cursor cannot be invoked, return nothing.

@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up work to the Cursor rescue subagent
-argument-hint: "[--background|--wait] [--model <slug>] [--read-only] [--workspace <abs>] [what Cursor should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--model <slug>] [--read-only] [--sandbox enabled|disabled] [--workspace <abs>] [--add-dir <abs>]... [request]"
 allowed-tools: Bash(node:*), Agent
 ---
 
@@ -17,7 +17,7 @@ Execution mode:
 - If the request includes `--wait`, run the `cursor:cursor-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model`, `--read-only`, and `--workspace` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--model`, `--read-only`, `--sandbox`, `--workspace`, and repeated `--add-dir` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 
 Operating rules:
 

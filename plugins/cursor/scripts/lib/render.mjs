@@ -4,6 +4,7 @@ export function renderSetupReport(payload) {
     "",
     `- agent: ${payload.agent?.available ? payload.agent.bin : "missing"} (${payload.agent?.detail ?? ""})`,
     `- auth: ${payload.auth?.loggedIn ? "ok" : "needs login"}`,
+    `- sandbox: ${payload.sandboxSupported ? "supported" : "unsupported"}`,
     `- model: ${payload.model?.model ?? "(unset → Cursor CLI default/auto)"} [source=${payload.model?.source}]`,
     `- companionScript: ${payload.companionScript ?? ""}`,
     `- config: ${payload.configPath ?? ""}`,
@@ -12,6 +13,8 @@ export function renderSetupReport(payload) {
     lines.push("", "Install Cursor Agent CLI and ensure `agent` or `cursor-agent` is on PATH.")
   } else if (!payload.auth?.loggedIn) {
     lines.push("", "Run: agent login")
+  } else if (!payload.sandboxSupported) {
+    lines.push("", "Upgrade Cursor Agent CLI to a version that supports `--sandbox`.")
   } else {
     lines.push("", "Ready.")
   }
@@ -24,8 +27,13 @@ export function renderTaskResult(job) {
     "",
     `- status: ${job.status}`,
     `- workspace: ${job.workspace}`,
+    ...(job.workspaceRoots?.length > 1
+      ? job.workspaceRoots.slice(1).map((root) => `- addDir: ${root}`)
+      : []),
     `- model: ${job.model ?? "(unset)"}`,
     `- mode: ${job.mode ?? "simple"}`,
+    `- sandbox: ${job.sandbox ?? "enabled"}`,
+    `- hostAccess: ${job.hostAccess ?? "workspace"}`,
   ]
   if (job.exitCode != null) lines.push(`- exitCode: ${job.exitCode}`)
   if (job.logFile) lines.push(`- log: ${job.logFile}`)

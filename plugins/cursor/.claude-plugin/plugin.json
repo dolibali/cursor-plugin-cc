@@ -1,8 +1,10 @@
 {
   "name": "cursor",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "description": "Use local Cursor Agent CLI from Claude Code to delegate tasks.",
   "author": {
     "name": "dolibali"
-  }
+  },
+  "homepage": "https://github.com/dolibali/cursor-plugin-cc",
+  "repository": "https://github.com/dolibali/cursor-plugin-cc"
 }

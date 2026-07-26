@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process"
-import { appendFile, writeFile } from "node:fs/promises"
+import { appendFile, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
+
+const args = process.argv.slice(2)
+if (args.includes("--help")) {
+  process.stdout.write("Usage: fake-agent --sandbox enabled|disabled --add-dir <path>\n")
+  process.exit(0)
+}
+if (args.includes("status")) {
+  process.stdout.write("Logged in as fake-user\n")
+  process.exit(0)
+}
 
 const artifactDir = process.env.DELEGATED_TEST_ARTIFACT_DIR
 const workspace = process.env.DELEGATED_TEST_WORKSPACE
+const workspaces = JSON.parse(process.env.DELEGATED_TEST_WORKSPACES ?? `["${workspace}"]`)
 const mode = process.env.FAKE_AGENT_MODE ?? "pass"
 const progressFile = process.env.DELEGATED_TEST_PROGRESS_FILE
 
@@ -49,6 +60,61 @@ if (mode === "stream-without-progress") {
     })}\n`)
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
+}
+if (mode === "task-tool-call") {
+  process.stdout.write(`${JSON.stringify({
+    type: "tool_call",
+    subtype: "started",
+    tool_call: { taskToolCall: { args: { description: "Nested delegated task" } } },
+  })}\n`)
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  process.exit(0)
+}
+if (mode === "shell-unavailable" || mode === "shell-failure-reset") {
+  const emitShellResult = (failed) => {
+    const result = failed
+      ? {
+          spawnError: {
+            error: "The shell command returned no exit status, so its result is unknown.",
+          },
+        }
+      : { exitCode: 0, stdout: "ok", stderr: "" }
+    process.stdout.write(`${JSON.stringify({
+      type: "tool_call",
+      subtype: "completed",
+      tool_call: { shellToolCall: { result } },
+    })}\n`)
+  }
+  if (mode === "shell-unavailable") {
+    for (let index = 0; index < 3; index += 1) emitShellResult(true)
+    await new Promise((resolve) => setTimeout(resolve, 30_000))
+    process.exit(0)
+  }
+  emitShellResult(true)
+  emitShellResult(false)
+  emitShellResult(true)
+  emitShellResult(true)
+}
+if (mode === "detached-process") {
+  process.stdout.write(`${JSON.stringify({
+    type: "tool_call",
+    subtype: "started",
+    tool_call: {
+      shellToolCall: {
+        args: {
+          command: "nohup node server.mjs >/tmp/server.log 2>&1 &",
+          simpleCommands: ["nohup", "node"],
+        },
+      },
+    },
+  })}\n`)
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  process.exit(0)
+}
+if (mode === "path-detached-process") {
+  await childExit("nohup", [process.execPath, "-e", "setTimeout(() => {}, 30000)"])
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  process.exit(0)
 }
 if (mode === "long-command-timeout") {
   await progress({ type: "long-command", state: "start", command: "fake long command", expectedMaxMs: 100 })
@@ -101,6 +167,10 @@ if (mode === "autonomous-repair") {
   await appendFile(path.join(workspace, "src/product.ts"), "\n// autonomous repair\n")
   await progress({ type: "meaningful-progress", kind: "repair", summary: "repaired product behavior" })
 }
+if (mode === "additional-workspace-repair") {
+  await appendFile(path.join(workspaces[1], "src/product.ts"), "\n// additional workspace repair\n")
+  await progress({ type: "meaningful-progress", kind: "repair", summary: "repaired additional workspace" })
+}
 if (mode === "many-autonomous-repairs") {
   for (let index = 0; index < 4; index += 1) {
     await appendFile(path.join(workspace, "src/product.ts"), `\n// autonomous repair ${index}\n`)
@@ -116,19 +186,22 @@ if (mode === "absolute-git-commit") {
   await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspace, "add", "src/product.ts"])
   await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspace, "commit", "-m", "forbidden"])
 }
+if (mode === "additional-workspace-commit") {
+  await appendFile(path.join(workspaces[1], "src/product.ts"), "\n// committed in additional workspace\n")
+  await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspaces[1], "add", "src/product.ts"])
+  await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspaces[1], "commit", "-m", "forbidden"])
+}
 if (mode === "missing-result") process.exit(0)
 
+const delegation = JSON.parse(await readFile(path.join(artifactDir, "delegation.json"), "utf8"))
+const checks = [
+  { id: "fake-check", status: "PASS", required: true },
+  ...delegation.optionalChecks.map((id) => ({ id, status: "PASS", required: false })),
+]
 const result = {
   schemaVersion: 1,
   summary: "Fake delegated test completed",
-  checks: [
-    {
-      id: "fake-check",
-      status: "PASS",
-      required: true,
-      evidence: "fake evidence",
-    },
-  ],
+  checks: checks.map((check) => ({ ...check, evidence: "fake evidence" })),
   cleanup: {
     status: "PASS",
     details: "nothing left running",
@@ -136,7 +209,11 @@ const result = {
   artifacts: [],
   blockers: [],
 }
-const repairCount = mode === "many-autonomous-repairs" ? 4 : mode === "autonomous-repair" ? 1 : 0
+const repairCount = mode === "many-autonomous-repairs"
+  ? 4
+  : mode === "autonomous-repair" || mode === "additional-workspace-repair"
+    ? 1
+    : 0
 result.repair = {
   status: repairCount > 0 ? "APPLIED_AND_VERIFIED" : "NONE",
   iterations: Array.from({ length: repairCount }, (_, index) => ({

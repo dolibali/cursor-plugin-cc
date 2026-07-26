@@ -1,6 +1,7 @@
 export function parseArgs(argv, config = {}) {
   const valueOptions = new Set(config.valueOptions ?? [])
   const booleanOptions = new Set(config.booleanOptions ?? [])
+  const repeatableOptions = new Set(config.repeatableOptions ?? [])
   const aliasMap = config.aliasMap ?? {}
   const options = {}
   const positionals = []
@@ -29,6 +30,9 @@ export function parseArgs(argv, config = {}) {
       const key = aliasMap[rawKey] ?? rawKey
 
       if (booleanOptions.has(key)) {
+        if (inlineValue !== undefined && inlineValue !== "true" && inlineValue !== "false") {
+          throw new Error(`Invalid boolean value for --${rawKey}: ${inlineValue}`)
+        }
         options[key] = inlineValue === undefined ? true : inlineValue !== "false"
         continue
       }
@@ -38,15 +42,18 @@ export function parseArgs(argv, config = {}) {
         if (nextValue === undefined) {
           throw new Error(`Missing value for --${rawKey}`)
         }
-        options[key] = nextValue
+        if (repeatableOptions.has(key)) {
+          options[key] = [...(options[key] ?? []), nextValue]
+        } else {
+          options[key] = nextValue
+        }
         if (inlineValue === undefined) {
           index += 1
         }
         continue
       }
 
-      positionals.push(token)
-      continue
+      throw new Error(`Unknown option: --${rawKey}`)
     }
 
     const shortKey = token.slice(1)
@@ -62,12 +69,16 @@ export function parseArgs(argv, config = {}) {
       if (nextValue === undefined) {
         throw new Error(`Missing value for -${shortKey}`)
       }
-      options[key] = nextValue
+      if (repeatableOptions.has(key)) {
+        options[key] = [...(options[key] ?? []), nextValue]
+      } else {
+        options[key] = nextValue
+      }
       index += 1
       continue
     }
 
-    positionals.push(token)
+    throw new Error(`Unknown option: -${shortKey}`)
   }
 
   return { options, positionals }
@@ -118,6 +129,12 @@ export function splitRawArgumentString(raw) {
 
   if (current) {
     tokens.push(current)
+  }
+  if (quote) {
+    throw new Error("Unterminated quoted argument")
+  }
+  if (escaping) {
+    throw new Error("Trailing escape in argument string")
   }
   return tokens
 }

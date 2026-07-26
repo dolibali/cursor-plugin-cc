@@ -3,7 +3,7 @@
 Use this contract when a parent Agent delegates validation and autonomous GUI repair to Cursor CLI. Feature-specific checks, fixtures, commands, and locators belong in the task prompt.
 
 - the parent freezes the current Git worktree;
-- the Worker may edit production code, tests, fixtures, and test infrastructure inside that workspace;
+- the Worker may edit production code, tests, fixtures, and test infrastructure inside the explicitly declared workspaces;
 - the Worker diagnoses, repairs, runs the smallest affected baseline checks, and reruns GUI checks until all required checks pass or an escalation boundary is reached;
 - repair iteration count is unlimited.
 
@@ -12,10 +12,11 @@ The Worker may make no changes when validation already passes. It must not commi
 ## Runner
 
 ```bash
-node "$COMPANION" task --mode e2e   # or: node <repo>/scripts/run-delegated-test.mjs \
+node "$COMPANION" task --mode e2e \
   --workspace <absolute-git-workspace> \
+  [--add-dir <absolute-git-workspace>]... \
   --prompt-file <absolute-task-prompt> \
-  --artifact-dir <absolute-directory-outside-workspace> \
+  --artifact-dir <absolute-system-temp-directory> \
   --required-check <stable-check-id>
 ```
 
@@ -30,11 +31,17 @@ Defaults:
 - artifact heartbeat: 30 seconds;
 - recursion process-tree scan: 10 seconds.
 
-The artifact directory must be outside the Git workspace.
+The artifact directory must be under the system temporary directory and
+outside every declared Git workspace.
 
 ## Parent session
 
-The parent starts the Runner with one blocking shell call (for example Codex `shell_command`) and waits until the process exits. Set the tool `timeout_ms` to at least the Runner total timeout ceiling (default **10800000** ms = 3 hours). Do not use short-yield `exec_command` plus empty `write_stdin` polling to continue waiting.
+Immediately before the blocking call, the parent sends a visible conversation
+update stating that Cursor is starting autonomous GUI validation and may run up
+to the configured ceiling. The update must precede the tool call; Runner stdout
+does not replace it.
+
+The parent then starts the Runner with one blocking shell call (for example Codex `shell_command`) and waits until the process exits. Set the tool `timeout_ms` to at least the Runner total timeout ceiling (default **10800000** ms = 3 hours). Do not use short-yield `exec_command` plus empty `write_stdin` polling to continue waiting.
 
 Stop semantics:
 
@@ -44,6 +51,11 @@ Stop semantics:
 - Artifact heartbeats do **not** wake the parent model. The parent continues only after the child process returns.
 
 While waiting, the parent must not read heartbeat files, progress JSONL, stream logs, or screenshot directories, and must not poll with short timeouts. After exit, read only `<artifact-dir>/run-result.json` by default; open additional contract summary fields only when diagnosing failure. A single tool await idle-wait does not consume parent LLM tokens; repeated poll turns do.
+
+Each concurrent delegation uses its own system-temporary artifact directory and
+job ID. Concurrent jobs may share a workspace, but result, status, and cancel
+operations remain scoped to the intended job. A shared active artifact
+directory is rejected.
 
 ## Meaningful Progress
 
@@ -82,6 +94,10 @@ The Runner:
 - terminates an Agent executable launched through an absolute path;
 - allows the root Worker to continue after one blocked attempt;
 - stops and escalates after repeated recursion attempts.
+- stops immediately when Cursor attempts an internal `taskToolCall`.
+- stops after three consecutive Shell Tool results report no exit status.
+- blocks detached launch mechanisms such as `nohup`, `setsid`, `systemd-run`,
+  `disown`, `Start-Process`, and launch-style `launchctl` subcommands.
 
 Electron, Extension Host, Playwright, shell commands, and ordinary processes whose names merely contain `agent` are not nested Cursor Workers.
 

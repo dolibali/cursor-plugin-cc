@@ -1,15 +1,20 @@
 # cursor-plugin-cc
 
-Delegate work to the local [Cursor Agent CLI](https://cursor.com) (`agent` / `cursor-agent`) from **Codex** (skill + companion) or **Claude Code** (slash commands + rescue).
+Delegate work from Codex or Claude Code to the local
+[Cursor Agent CLI](https://cursor.com) (`agent` / `cursor-agent`).
 
-Inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) companion / job patterns and `*-cli-runtime` naming. Product direction is **parent agent → Cursor CLI** (not Claude → Codex App Server).
+The companion/job structure is inspired by
+[openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), while this
+project runs Cursor CLI directly and includes a generic autonomous E2E runner.
 
 ## Requirements
 
-- Node.js ≥ 18.18
-- Cursor Agent CLI on PATH (`agent` or `cursor-agent`), with `agent login` completed
+- Node.js 18.18 or newer
+- Cursor Agent CLI on `PATH`
+- `agent login` completed
+- A Cursor CLI version supporting `--sandbox`
 
-## Install for Codex
+## Codex installation
 
 ```bash
 git clone https://github.com/dolibali/cursor-plugin-cc.git
@@ -17,83 +22,85 @@ cd cursor-plugin-cc
 ./scripts/install-skills.sh
 ```
 
-This will:
+The installer links the bundled `cursor-cli-runtime` skill into both
+`~/.codex/skills` and `~/.agents/skills`, then records the bundled companion
+path in `~/.cursor/cursor-companion/config.json`.
 
-- Symlink `skills/cursor-cli-runtime` into `~/.codex/skills/` and `~/.agents/skills/`
-- Write `companionScript` into `~/.cursor/cursor-companion/config.json`
+Existing real files or directories are never deleted. Use `--replace-link` to
+replace an older symlink, `--dry-run` to preview, and
+`./scripts/uninstall-skills.sh` to remove links owned by this checkout.
 
-**Keep the clone path stable** — install uses symlinks into the repo.
+Start a new Codex turn, then invoke `$cursor-cli-runtime` or ask Codex to use
+Cursor.
 
-Start a **new** Codex turn, then:
-
-1. `$cursor-cli-runtime` + task text  
-2. `/skills` → `cursor-cli-runtime`  
-3. Natural language: "use Cursor …"
-
-Codex cannot register custom `/cursor:*` slashes; the skill is the entrypoint.
-
-## Install for Claude Code
+## Claude Code installation
 
 ```bash
 /plugin marketplace add dolibali/cursor-plugin-cc
-# or local path:
-# /plugin marketplace add /path/to/cursor-plugin-cc
 /plugin install cursor@dolibali-cursor
 /reload-plugins
 /cursor:setup
 ```
 
-Then:
+Available commands are `/cursor:rescue`, `/cursor:setup`, `/cursor:status`,
+`/cursor:result`, and `/cursor:cancel`.
+
+## Companion
 
 ```bash
-/cursor:rescue fix the flaky test
-/cursor:rescue --background investigate the regression
-/cursor:status
-/cursor:result
-/cursor:cancel
+COMPANION=plugins/cursor/scripts/cursor-companion.mjs
+
+node "$COMPANION" setup --json
+node "$COMPANION" task --workspace /abs/repo -- "Fix the failing test"
+node "$COMPANION" task --workspace /abs/repo --read-only -- "Investigate the failure"
+node "$COMPANION" task --workspace /abs/repo --background -- "Run the long migration"
 ```
 
-Slash commands call the same `scripts/cursor-companion.mjs` as Codex.
+### Multiple workspaces
 
-## Usage (companion CLI)
+Declare every writable project explicitly:
 
 ```bash
-node /path/to/cursor-plugin-cc/scripts/cursor-companion.mjs setup --json
-
-node .../cursor-companion.mjs task --workspace /abs/code -- "Fix the flaky test"
-# --workspace defaults to process.cwd() when omitted
-node .../cursor-companion.mjs task -- "Fix the flaky test"
-
-node .../cursor-companion.mjs task --workspace /abs/code --background -- "long job"
-node .../cursor-companion.mjs status --workspace /abs/code
-node .../cursor-companion.mjs result --workspace /abs/code
+node "$COMPANION" task \
+  --workspace /abs/frontend \
+  --add-dir /abs/backend \
+  --add-dir /abs/shared \
+  -- "Update the cross-repository contract and tests"
 ```
 
-### Model
+The companion does not infer or expose a common parent directory.
 
-Leave `--model` unset by default (Cursor CLI default / `auto`).
+### Sandbox
+
+`--sandbox enabled` is the default. It keeps Cursor writes inside the declared
+workspace roots and system temporary storage.
 
 ```bash
-node .../cursor-companion.mjs setup --set-model cursor-grok-4.5-high-fast
-node .../cursor-companion.mjs setup --set-model -   # clear
-# or: export CURSOR_COMPANION_MODEL=...
+# Explicit unrestricted host access
+node "$COMPANION" task \
+  --workspace /abs/repo \
+  --sandbox disabled \
+  -- "Perform the requested host-level integration"
 ```
 
-### E2E / delegated tests
+Sandbox mode never falls back to unrestricted access. Use
+`--sandbox disabled` only when the caller intentionally accepts host-wide
+access.
+
+### Delegated E2E
 
 ```bash
-node .../cursor-companion.mjs task --mode e2e \
-  --workspace /abs/git \
-  --prompt-file /abs/prompt.md \
-  --artifact-dir /abs/artifacts-outside-repo \
-  --required-check my-check
+node "$COMPANION" task --mode e2e \
+  --workspace /abs/git-repo \
+  --add-dir /abs/second-git-repo \
+  --prompt-file /abs/task.md \
+  --artifact-dir /tmp/cursor-e2e-artifacts \
+  --required-check package \
+  --required-check gui
 ```
 
-See `skills/cursor-cli-runtime/references/delegated-test-contract.md`.
-
-### Parent wait (Codex)
-
-One `shell_command`, `timeout_ms` ≥ 3h ceiling, wait until exit. Do not poll with empty `write_stdin`.
+Artifacts must be under the system temporary directory and outside every
+workspace. See the delegated-test contract bundled with the runtime skill.
 
 ## Tests
 
@@ -101,6 +108,17 @@ One `shell_command`, `timeout_ms` ≥ 3h ceiling, wait until exit. Do not poll w
 npm test
 ```
 
-## Version
+The real Cursor smoke test is deliberately separate because it installs the
+current Codex skill links and consumes one real Cursor request:
 
-0.2.0 — Claude Code marketplace / `/cursor:*` / `cursor-rescue` added; Codex skill remains the primary install path.
+```bash
+npm run test:live:codex
+```
+
+It installs this checkout, creates a temporary Git repository, asks Cursor to
+write one deterministic file, verifies `task`, `status`, and `result`, and
+retains compact artifacts under the system temporary directory.
+
+## License
+
+Apache-2.0. See `LICENSE` and `NOTICE`.

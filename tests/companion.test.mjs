@@ -1,20 +1,86 @@
 import assert from "node:assert/strict"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 
+import { writeJobFile } from "../plugins/cursor/scripts/lib/state.mjs"
+
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
-const COMPANION = path.join(ROOT, "scripts", "cursor-companion.mjs")
+const COMPANION = path.join(ROOT, "plugins", "cursor", "scripts", "cursor-companion.mjs")
 const FAKE_AGENT = path.join(ROOT, "tests", "fake-agent.mjs")
+const FAKE_DELEGATED_AGENT = path.join(ROOT, "tests", "fake-agent-delegated.mjs")
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-home-"))
 
 function run(args, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
+    env: { ...process.env, HOME: TEST_HOME, ...env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
   })
+}
+
+function runAsync(args, env = {}) {
+  const child = spawn(process.execPath, [COMPANION, ...args], {
+    env: { ...process.env, HOME: TEST_HOME, ...env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let stdout = ""
+  let stderr = ""
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk
+  })
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk
+  })
+  return {
+    child,
+    completed: new Promise((resolve) => {
+      child.once("close", (code, signal) => resolve({ status: code, signal, stdout, stderr }))
+    }),
+  }
+}
+
+function wait(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function waitForJob(workspace, jobId, expectedStatuses, attempts = 60) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const status = run(["status", jobId, "--workspace", workspace, "--json"])
+    assert.equal(status.status, 0, status.stderr)
+    const job = JSON.parse(status.stdout)
+    if (expectedStatuses.includes(job.status)) return job
+    wait(50)
+  }
+  assert.fail(`job ${jobId} did not reach ${expectedStatuses.join(" or ")}`)
+}
+
+function createGitWorkspace(parent, name) {
+  const workspace = path.join(parent, name)
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true })
+  fs.writeFileSync(path.join(workspace, "src", "product.ts"), "export const value = 1\n")
+  for (const args of [
+    ["init"],
+    ["config", "user.email", "test@example.com"],
+    ["config", "user.name", "Test User"],
+    ["add", "."],
+    ["commit", "-m", "fixture"],
+  ]) {
+    const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  return workspace
 }
 
 test("setup --json reports model unset and fake agent", () => {
@@ -26,7 +92,7 @@ test("setup --json reports model unset and fake agent", () => {
 })
 
 test("task rejects home workspace", () => {
-  const result = run(["task", "--workspace", os.homedir(), "--", "hello"])
+  const result = run(["task", "--workspace", TEST_HOME, "--", "hello"])
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /home directory/i)
 })
@@ -74,10 +140,421 @@ test("task defaults workspace to cwd when omitted", () => {
   const result = spawnSync(process.execPath, [COMPANION, "task", "--json", "--", "default cwd task"], {
     encoding: "utf8",
     cwd: workspace,
-    env: { ...process.env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
+    env: { ...process.env, HOME: TEST_HOME, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
   })
   assert.equal(result.status, 0, result.stderr + result.stdout)
   const job = JSON.parse(result.stdout)
   assert.equal(job.status, "completed")
   assert.equal(fs.realpathSync(job.workspace), fs.realpathSync(workspace))
+})
+
+test("rejects unknown options before creating a job", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const result = run(["task", "--workspacee", workspace, "--", "hello"])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /Unknown option: --workspacee/)
+  const status = run(["status", "--workspace", workspace, "--json"])
+  assert.deepEqual(JSON.parse(status.stdout).jobs, [])
+})
+
+test("forwards canonical multi-workspace roots and explicit sandbox mode", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const additional = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-add-"))
+  const argsLog = path.join(os.tmpdir(), `cursor-companion-args-${process.pid}-${Date.now()}.json`)
+  const result = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--add-dir",
+    additional,
+    "--add-dir",
+    additional,
+    "--sandbox",
+    "disabled",
+    "--json",
+    "--",
+    "cross repository task",
+  ], { FAKE_AGENT_ARGV_LOG: argsLog })
+  assert.equal(result.status, 0, result.stderr)
+  const job = JSON.parse(result.stdout)
+  assert.deepEqual(job.workspaceRoots, [fs.realpathSync(workspace), fs.realpathSync(additional)])
+  assert.equal(job.hostAccess, "unrestricted")
+  const agentArgs = JSON.parse(fs.readFileSync(argsLog, "utf8"))
+  assert.deepEqual(agentArgs.slice(agentArgs.indexOf("--sandbox"), agentArgs.indexOf("--sandbox") + 2), [
+    "--sandbox",
+    "disabled",
+  ])
+  assert.equal(agentArgs.filter((value) => value === "--add-dir").length, 1)
+})
+
+test("sandbox mode fails closed when Cursor CLI lacks support", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const result = run(
+    ["task", "--workspace", workspace, "--json", "--", "hello"],
+    { FAKE_AGENT_NO_SANDBOX: "1" },
+  )
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /does not support --sandbox/)
+  const status = run(["status", "--workspace", workspace, "--json"])
+  assert.deepEqual(JSON.parse(status.stdout).jobs, [])
+})
+
+test("rejects ignored E2E-only options and timeout overflow before creating a job", () => {
+  for (const extraArgs of [
+    ["--required-check", "fake-check"],
+    ["--no-progress-timeout-ms", "1000"],
+    ["--timeout-ms", String(3 * 60 * 60 * 1000 + 1)],
+  ]) {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+    const result = run([
+      "task",
+      "--workspace",
+      workspace,
+      ...extraArgs,
+      "--",
+      "hello",
+    ])
+    assert.notEqual(result.status, 0)
+    const status = run(["status", "--workspace", workspace, "--json"])
+    assert.deepEqual(JSON.parse(status.stdout).jobs, [])
+  }
+})
+
+test("rejects invalid E2E artifact boundaries before creating a job", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-e2e-invalid-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const promptFile = path.join(root, "prompt.md")
+  fs.writeFileSync(promptFile, "test\n")
+  const result = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    promptFile,
+    "--artifact-dir",
+    path.join(workspace, "artifacts"),
+    "--required-check",
+    "fake-check",
+  ])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /outside every workspace/)
+  const status = run(["status", "--workspace", workspace, "--json"])
+  assert.deepEqual(JSON.parse(status.stdout).jobs, [])
+})
+
+test("accepts the POSIX /tmp system temporary root for E2E artifacts", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-e2e-posix-tmp-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const promptFile = path.join(root, "prompt.md")
+  const artifactRoot = fs.mkdtempSync("/tmp/cursor-companion-e2e-artifacts-")
+  const artifactDir = path.join(artifactRoot, "artifacts")
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true })
+    fs.rmSync(artifactRoot, { recursive: true, force: true })
+  })
+  fs.writeFileSync(promptFile, "Run the deterministic fake validation.\n")
+  const result = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    promptFile,
+    "--artifact-dir",
+    artifactDir,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--json",
+  ], { FAKE_AGENT_MODE: "pass" })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(JSON.parse(result.stdout).status, "completed")
+})
+
+test("background jobs write a terminal result that status and result can read", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const queued = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--background",
+    "--json",
+    "--",
+    "background task",
+  ], { FAKE_AGENT_MODE: "slow" })
+  assert.equal(queued.status, 0, queued.stderr)
+  const jobId = JSON.parse(queued.stdout).id
+  const job = waitForJob(workspace, jobId, ["completed"])
+  assert.equal(job.status, "completed")
+  assert.equal(job.pid, null)
+  assert.equal("request" in job, false)
+  const result = run(["result", jobId, "--workspace", workspace, "--json"])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).job.status, "completed")
+})
+
+test("background failures reach a stable failed terminal state", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const queued = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--background",
+    "--json",
+    "--",
+    "background failure",
+  ], { FAKE_AGENT_MODE: "fail" })
+  assert.equal(queued.status, 0, queued.stderr)
+  const queuedJob = JSON.parse(queued.stdout)
+  assert.equal("request" in queuedJob, false)
+  const job = waitForJob(workspace, queuedJob.id, ["failed"])
+  assert.equal(job.exitCode, 2)
+  assert.equal(job.pid, null)
+})
+
+test("worker startup failures replace queued state with a failed terminal result", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const jobId = "worker-start-failure"
+  const originalHome = process.env.HOME
+  process.env.HOME = TEST_HOME
+  try {
+    writeJobFile(workspace, {
+      id: jobId,
+      kind: "task",
+      workspace,
+      background: true,
+      status: "queued",
+      phase: "queued",
+      createdAt: new Date().toISOString(),
+    })
+  } finally {
+    process.env.HOME = originalHome
+  }
+  const worker = run([
+    "task-worker",
+    "--workspace",
+    workspace,
+    "--job-id",
+    jobId,
+  ])
+  assert.notEqual(worker.status, 0)
+  const job = waitForJob(workspace, jobId, ["failed"])
+  assert.equal(job.failureCode, "WORKER_START_FAILED")
+  assert.equal(job.pid, null)
+})
+
+test("cancel terminates the background worker and active Cursor process tree", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const pidFile = path.join(os.tmpdir(), `cursor-companion-agent-${process.pid}-${Date.now()}.pid`)
+  const queued = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--background",
+    "--json",
+    "--",
+    "long background task",
+  ], { FAKE_AGENT_MODE: "very-slow", FAKE_AGENT_PID_FILE: pidFile })
+  assert.equal(queued.status, 0, queued.stderr)
+  const jobId = JSON.parse(queued.stdout).id
+  const running = waitForJob(workspace, jobId, ["running"])
+  assert.ok(running.pid)
+  for (let attempt = 0; attempt < 40 && !fs.existsSync(pidFile); attempt += 1) wait(25)
+  assert.equal(fs.existsSync(pidFile), true)
+  const agentPid = Number(fs.readFileSync(pidFile, "utf8").trim())
+  assert.equal(isProcessAlive(agentPid), true)
+
+  const cancelled = run(["cancel", jobId, "--workspace", workspace, "--json"])
+  assert.equal(cancelled.status, 0, cancelled.stderr)
+  assert.equal(JSON.parse(cancelled.stdout).status, "cancelled")
+  for (let attempt = 0; attempt < 80 && isProcessAlive(agentPid); attempt += 1) wait(25)
+  assert.equal(isProcessAlive(agentPid), false)
+  const terminal = waitForJob(workspace, jobId, ["cancelled"])
+  assert.equal(terminal.status, "cancelled")
+  assert.equal("request" in terminal, false)
+})
+
+test("same-workspace foreground jobs run independently and cancel requires an unambiguous job", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const first = runAsync(
+    ["task", "--workspace", workspace, "--json", "--", "foreground-a"],
+    { FAKE_AGENT_MODE: "very-slow" },
+  )
+  const second = runAsync(
+    ["task", "--workspace", workspace, "--json", "--", "foreground-b"],
+    { FAKE_AGENT_MODE: "medium" },
+  )
+
+  let active = []
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const status = run(["status", "--workspace", workspace, "--all", "--json"])
+    assert.equal(status.status, 0, status.stderr)
+    active = JSON.parse(status.stdout).jobs.filter((job) => !["completed", "failed", "timeout", "cancelled"].includes(job.status))
+    if (active.length === 2) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(active.length, 2)
+  const firstJob = active.find((job) => job.promptPreview === "foreground-a")
+  const secondJob = active.find((job) => job.promptPreview === "foreground-b")
+  assert.ok(firstJob?.pid)
+  assert.ok(secondJob?.pid)
+  assert.notEqual(firstJob.id, secondJob.id)
+  assert.notEqual(firstJob.pid, secondJob.pid)
+
+  const ambiguous = run(["cancel", "--workspace", workspace, "--json"])
+  assert.notEqual(ambiguous.status, 0)
+  assert.match(ambiguous.stderr, /AMBIGUOUS_ACTIVE_JOBS/)
+
+  const cancelled = run(["cancel", firstJob.id, "--workspace", workspace, "--json"])
+  assert.equal(cancelled.status, 0, cancelled.stderr)
+  assert.equal(JSON.parse(cancelled.stdout).status, "cancelled")
+
+  const [firstResult, secondResult] = await Promise.all([first.completed, second.completed])
+  assert.notEqual(firstResult.status, 0)
+  assert.equal(secondResult.status, 0, secondResult.stderr + secondResult.stdout)
+  assert.equal(JSON.parse(firstResult.stdout).status, "cancelled")
+  assert.equal(JSON.parse(secondResult.stdout).status, "completed")
+})
+
+test("different workspaces can run foreground jobs concurrently", async () => {
+  const firstWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-a-"))
+  const secondWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-b-"))
+  const first = runAsync(
+    ["task", "--workspace", firstWorkspace, "--json", "--", "workspace-a"],
+    { FAKE_AGENT_MODE: "medium" },
+  )
+  const second = runAsync(
+    ["task", "--workspace", secondWorkspace, "--json", "--", "workspace-b"],
+    { FAKE_AGENT_MODE: "medium" },
+  )
+  const [firstResult, secondResult] = await Promise.all([first.completed, second.completed])
+  assert.equal(firstResult.status, 0, firstResult.stderr)
+  assert.equal(secondResult.status, 0, secondResult.stderr)
+  const firstJob = JSON.parse(firstResult.stdout)
+  const secondJob = JSON.parse(secondResult.stdout)
+  assert.equal(firstJob.status, "completed")
+  assert.equal(secondJob.status, "completed")
+  assert.notEqual(firstJob.id, secondJob.id)
+})
+
+test("parent interruption cancels its foreground worker and Cursor process tree", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const pidFile = path.join(os.tmpdir(), `cursor-companion-foreground-agent-${process.pid}-${Date.now()}.pid`)
+  const foreground = runAsync(
+    ["task", "--workspace", workspace, "--json", "--", "interrupt foreground"],
+    { FAKE_AGENT_MODE: "very-slow", FAKE_AGENT_PID_FILE: pidFile },
+  )
+  let job = null
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const status = run(["status", "--workspace", workspace, "--json"])
+    assert.equal(status.status, 0, status.stderr)
+    job = JSON.parse(status.stdout).jobs[0] ?? null
+    if (job?.status === "running" && fs.existsSync(pidFile)) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(job?.status, "running")
+  const agentPid = Number(fs.readFileSync(pidFile, "utf8").trim())
+  assert.equal(isProcessAlive(agentPid), true)
+
+  foreground.child.kill("SIGTERM")
+  const completed = await foreground.completed
+  assert.notEqual(completed.status, 0)
+  assert.equal(JSON.parse(completed.stdout).status, "cancelled")
+  for (let attempt = 0; attempt < 80 && isProcessAlive(agentPid); attempt += 1) wait(25)
+  assert.equal(isProcessAlive(agentPid), false)
+})
+
+test("atomically rejects a shared artifact directory used by concurrent E2E jobs", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-e2e-conflict-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const promptFile = path.join(root, "prompt.md")
+  const artifactDir = path.join(root, "artifacts")
+  fs.mkdirSync(artifactDir)
+  fs.writeFileSync(promptFile, "Run the deterministic fake validation.\n")
+  const common = [
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    promptFile,
+    "--artifact-dir",
+    artifactDir,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--background",
+    "--json",
+  ]
+  const first = runAsync(common, { FAKE_AGENT_MODE: "sleep" })
+  const second = runAsync(common, { FAKE_AGENT_MODE: "sleep" })
+  const attempts = await Promise.all([first.completed, second.completed])
+  const accepted = attempts.find((attempt) => attempt.status === 0)
+  const rejected = attempts.find((attempt) => attempt.status !== 0)
+  assert.ok(accepted)
+  assert.ok(rejected)
+  assert.match(rejected.stderr, /Artifact directory is already used by active job/)
+  const acceptedJob = JSON.parse(accepted.stdout)
+  waitForJob(workspace, acceptedJob.id, ["running"])
+
+  const cancelled = run(["cancel", acceptedJob.id, "--workspace", workspace, "--json"])
+  assert.equal(cancelled.status, 0, cancelled.stderr)
+})
+
+test("e2e mode forwards roots, checks, sandbox, and timeout boundaries to the runner", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-e2e-"))
+  const workspace = createGitWorkspace(root, "primary")
+  const additional = createGitWorkspace(root, "additional")
+  const artifactDir = path.join(root, "artifacts")
+  const promptFile = path.join(root, "prompt.md")
+  fs.mkdirSync(artifactDir)
+  fs.writeFileSync(promptFile, "Run the deterministic fake validation.\n")
+  const result = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--add-dir",
+    additional,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    promptFile,
+    "--artifact-dir",
+    artifactDir,
+    "--required-check",
+    "fake-check",
+    "--optional-check",
+    "optional-smoke",
+    "--timeout-ms",
+    "5000",
+    "--no-progress-timeout-ms",
+    "2000",
+    "--long-command-timeout-ms",
+    "1500",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--json",
+  ], { FAKE_AGENT_MODE: "pass" })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const job = JSON.parse(result.stdout)
+  assert.equal(job.status, "completed")
+  const delegation = JSON.parse(fs.readFileSync(path.join(artifactDir, "delegation.json"), "utf8"))
+  assert.deepEqual(delegation.workspaceRoots, [
+    fs.realpathSync(workspace),
+    fs.realpathSync(additional),
+  ])
+  assert.deepEqual(delegation.requiredChecks, ["fake-check"])
+  assert.deepEqual(delegation.optionalChecks, ["optional-smoke"])
+  assert.equal(delegation.sandbox, "enabled")
+  assert.equal(delegation.timeoutMs, 5000)
+  assert.equal(delegation.noProgressTimeoutMs, 2000)
+  assert.equal(delegation.longCommandTimeoutMs, 1500)
 })

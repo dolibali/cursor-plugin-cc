@@ -1,14 +1,16 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
-import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises"
+import fs from "node:fs"
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import test from "node:test"
+import { fileURLToPath } from "node:url"
 
 const execFileAsync = promisify(execFile)
-const skillRoot = path.resolve(import.meta.dirname, "..")
-const runner = path.join(skillRoot, "scripts/run-delegated-test.mjs")
+const skillRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
+const runner = path.join(skillRoot, "plugins/cursor/scripts/run-delegated-test.mjs")
 const fakeAgent = path.join(skillRoot, "tests/fake-agent-delegated.mjs")
 const realGitBin = (await execFileAsync("which", ["git"])).stdout.trim()
 
@@ -37,6 +39,16 @@ async function fixture() {
 
 async function runFixture(mode, options = {}) {
   const current = await fixture()
+  if (options.additionalWorkspace) {
+    current.additionalWorkspace = path.join(current.root, "additional-workspace")
+    await mkdir(path.join(current.additionalWorkspace, "src"), { recursive: true })
+    await writeFile(path.join(current.additionalWorkspace, "src/product.ts"), "export const value = 1\n")
+    await command("git", ["init"], current.additionalWorkspace)
+    await command("git", ["config", "user.email", "test@example.com"], current.additionalWorkspace)
+    await command("git", ["config", "user.name", "Test User"], current.additionalWorkspace)
+    await command("git", ["add", "."], current.additionalWorkspace)
+    await command("git", ["commit", "-m", "fixture"], current.additionalWorkspace)
+  }
   if (options.preexistingProductionChange) {
     await writeFile(path.join(current.workspace, "src/product.ts"), "export const value = 2\n// user change\n")
   }
@@ -58,7 +70,10 @@ async function runFixture(mode, options = {}) {
     String(options.noProgressTimeoutMs ?? 2_000),
     "--long-command-timeout-ms",
     String(options.longCommandTimeoutMs ?? 2_000),
+    "--sandbox",
+    options.sandbox ?? "enabled",
   ]
+  if (current.additionalWorkspace) args.push("--add-dir", current.additionalWorkspace)
   let exitCode = 0
   let stdout = ""
   let stderr = ""
@@ -103,7 +118,9 @@ test("allows verified source repairs", async () => {
   assert.equal(output.exitCode, 0)
   assert.equal(output.result.overall, "PASS")
   assert.equal(output.result.repair.status, "APPLIED_AND_VERIFIED")
-  assert.deepEqual(output.result.repair.changedFiles, ["src/product.ts"])
+  assert.deepEqual(output.result.repair.changedFiles, [
+    { workspace: fs.realpathSync(output.workspace), path: "src/product.ts" },
+  ])
   assert.match(await readFile(output.result.attemptedRepairPatch, "utf8"), /autonomous repair/)
 })
 
@@ -225,6 +242,53 @@ test("rejects nested runner invocation before creating artifacts", async () => {
   )
 })
 
+test("stops immediately when Cursor starts an internal task tool call", async () => {
+  const output = await runFixture("task-tool-call", {
+    timeoutMs: 2_000,
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("RECURSIVE_DELEGATION_TOOL_CALL"))
+  assert.equal(output.result.recursionGuard.blockedAttempts, 1)
+})
+
+test("stops after three consecutive shell results have no exit status", async () => {
+  const output = await runFixture("shell-unavailable", {
+    timeoutMs: 2_000,
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("WORKER_SHELL_UNAVAILABLE"))
+  assert.equal(output.result.executionGuard.consecutiveShellFailures, 3)
+})
+
+test("a successful shell result resets the unavailable-shell sequence", async () => {
+  const output = await runFixture("shell-failure-reset")
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.overall, "PASS")
+  assert.equal(output.result.executionGuard.consecutiveShellFailures, 2)
+})
+
+test("blocks detached process commands observed in the Cursor stream", async () => {
+  const output = await runFixture("detached-process", {
+    timeoutMs: 2_000,
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("PROHIBITED_DETACHED_PROCESS"))
+  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 1)
+})
+
+test("blocks detached process binaries through the delegated PATH", async () => {
+  const output = await runFixture("path-detached-process", {
+    timeoutMs: 2_000,
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("PROHIBITED_DETACHED_PROCESS"))
+  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 1)
+})
+
 test("blocks one PATH recursion attempt and lets the worker continue", async () => {
   const output = await runFixture("path-recursion")
   assert.equal(output.exitCode, 0)
@@ -281,6 +345,35 @@ test("detects repository metadata changes that bypass the PATH guard", async () 
   assert.ok(output.result.reasons.includes("PROHIBITED_GIT_STATE_CHANGE"))
   assert.ok(output.result.workspaceGuard.violations.includes("HEAD_CHANGED"))
   assert.equal(output.result.escalation.code, "PROHIBITED_GIT_STATE_CHANGE")
+})
+
+test("tracks repairs in an additional workspace", async () => {
+  const output = await runFixture("additional-workspace-repair", { additionalWorkspace: true })
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.overall, "PASS")
+  assert.deepEqual(output.result.workspaceRoots, [
+    fs.realpathSync(output.workspace),
+    fs.realpathSync(output.additionalWorkspace),
+  ])
+  assert.deepEqual(output.result.source.changes, [
+    { workspace: fs.realpathSync(output.additionalWorkspace), path: "src/product.ts" },
+  ])
+})
+
+test("detects protected Git metadata changes in an additional workspace", async () => {
+  const output = await runFixture("additional-workspace-commit", { additionalWorkspace: true })
+  assert.equal(output.exitCode, 2)
+  assert.equal(output.result.overall, "FAIL")
+  assert.ok(output.result.reasons.includes("PROHIBITED_GIT_STATE_CHANGE"))
+  assert.ok(output.result.workspaceGuard.workspaces[1].violations.includes("HEAD_CHANGED"))
+})
+
+test("records unrestricted boundary metadata when sandbox is disabled", async () => {
+  const output = await runFixture("pass", { sandbox: "disabled" })
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.sandbox, "disabled")
+  assert.equal(output.result.hostAccess, "unrestricted")
+  assert.equal(output.result.filesystemBoundaryVerified, false)
 })
 
 test("defaults to three hours and thirty-minute progress boundaries", async () => {
@@ -385,7 +478,46 @@ test("rejects an artifact directory inside the workspace without creating it", a
       "--required-check",
       "fake-check",
     ]),
-    /Artifact directory must be outside the workspace/,
+    /Artifact directory must be outside every workspace/,
   )
   await assert.rejects(access(insideArtifactDir))
+})
+
+test("accepts the POSIX /tmp system temporary root for runner artifacts", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const current = await fixture()
+  const artifactRoot = await mkdtemp("/tmp/delegated-test-runner-artifacts-")
+  const artifactDir = path.join(artifactRoot, "artifacts")
+  t.after(async () => {
+    await Promise.all([
+      rm(current.root, { recursive: true, force: true }),
+      rm(artifactRoot, { recursive: true, force: true }),
+    ])
+  })
+  await mkdir(artifactDir)
+  const output = await execFileAsync(process.execPath, [
+    runner,
+    "--workspace",
+    current.workspace,
+    "--prompt-file",
+    current.promptFile,
+    "--artifact-dir",
+    artifactDir,
+    "--agent-bin",
+    fakeAgent,
+    "--required-check",
+    "fake-check",
+  ], {
+    env: {
+      ...process.env,
+      CURSOR_DELEGATION_DEPTH: "0",
+      DELEGATED_TEST_GUARD_INTERVAL_MS: "25",
+      FAKE_AGENT_MODE: "pass",
+      FAKE_REAL_GIT_BIN: realGitBin,
+    },
+  })
+  assert.equal(output.stderr, "")
+  const result = JSON.parse(await readFile(path.join(artifactDir, "run-result.json"), "utf8"))
+  assert.equal(result.overall, "PASS")
 })
