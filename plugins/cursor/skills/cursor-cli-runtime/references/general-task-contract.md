@@ -19,6 +19,18 @@ node "$COMPANION" task --workspace <abs> [--add-dir <abs>]... \
 5. Set tool `timeout_ms` ≥ companion foreground ceiling (default 3h). Do not poll.
 6. Report companion/agent stdout to the user. Do not re-implement the task locally on failure unless the user asks.
 
+For a follow-up on the same goal, pass the prior job explicitly and provide only
+the incremental context:
+
+```bash
+node "$COMPANION" task --workspace <same-abs> \
+  --resume-job <prior-job-id-or-unique-prefix> -- "<incremental prompt>"
+```
+
+Resume creates a new job and process, requires matching workspace roots,
+sandbox, model, and read-only state, and fails if Cursor does not restore the
+expected session.
+
 ## Defaults
 
 - Write-capable (`--force` under the hood) unless `--read-only`

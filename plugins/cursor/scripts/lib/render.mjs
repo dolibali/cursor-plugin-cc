@@ -35,6 +35,7 @@ export function renderTaskResult(job) {
     `- sandbox: ${job.sandbox ?? "enabled"}`,
     `- hostAccess: ${job.hostAccess ?? "workspace"}`,
   ]
+  if (job.resumedFromJobId) lines.push(`- resumedFrom: ${job.resumedFromJobId}`)
   if (job.exitCode != null) lines.push(`- exitCode: ${job.exitCode}`)
   if (job.logFile) lines.push(`- log: ${job.logFile}`)
   if (job.resultFile) lines.push(`- resultFile: ${job.resultFile}`)

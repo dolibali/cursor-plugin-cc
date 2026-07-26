@@ -74,6 +74,17 @@ async function runFixture(mode, options = {}) {
     options.sandbox ?? "enabled",
   ]
   if (current.additionalWorkspace) args.push("--add-dir", current.additionalWorkspace)
+  if (options.resumeSessionId) {
+    args.push(
+      "--resume-session-id",
+      options.resumeSessionId,
+      "--resumed-from-job-id",
+      options.resumedFromJobId ?? "source-job",
+    )
+  }
+  if (options.captureAgentArgs) {
+    current.agentArgsLog = path.join(current.root, "agent-args.json")
+  }
   let exitCode = 0
   let stdout = ""
   let stderr = ""
@@ -85,6 +96,7 @@ async function runFixture(mode, options = {}) {
         DELEGATED_TEST_GUARD_INTERVAL_MS: "25",
         FAKE_AGENT_MODE: mode,
         FAKE_REAL_GIT_BIN: realGitBin,
+        ...(current.agentArgsLog ? { FAKE_AGENT_ARGV_LOG: current.agentArgsLog } : {}),
       },
     })
     stdout = output.stdout
@@ -110,7 +122,67 @@ test("returns PASS for a clean delegated run", async () => {
     cacheReadTokens: 50,
     cacheWriteTokens: 0,
   })
+  assert.deepEqual(output.result.cursorSession, {
+    id: "fake-cursor-session",
+    resumed: false,
+    resumedFromJobId: null,
+  })
+  const storedSession = JSON.parse(
+    await readFile(path.join(output.artifactDir, "cursor-session.json"), "utf8"),
+  )
+  assert.equal(storedSession.id, "fake-cursor-session")
+  assert.equal(storedSession.resumed, false)
+  assert.equal(storedSession.resumedFromJobId, null)
+  assert.match(storedSession.capturedAt, /^\d{4}-\d{2}-\d{2}T/)
   assert.match(await readFile(output.result.logs.progress, "utf8"), /"type":"cursor\.phase"/)
+})
+
+test("resumes the requested Cursor session and records explicit lineage", async () => {
+  const output = await runFixture("pass", {
+    resumeSessionId: "cursor-session-to-resume",
+    resumedFromJobId: "old-job-id",
+    captureAgentArgs: true,
+  })
+  assert.equal(output.exitCode, 0)
+  assert.deepEqual(output.result.cursorSession, {
+    id: "cursor-session-to-resume",
+    resumed: true,
+    resumedFromJobId: "old-job-id",
+  })
+  const args = JSON.parse(await readFile(output.agentArgsLog, "utf8"))
+  assert.deepEqual(args.slice(args.indexOf("--resume"), args.indexOf("--resume") + 2), [
+    "--resume",
+    "cursor-session-to-resume",
+  ])
+  const delegation = JSON.parse(
+    await readFile(path.join(output.artifactDir, "delegation.json"), "utf8"),
+  )
+  assert.deepEqual(delegation.cursorSession, {
+    resumed: true,
+    resumedFromJobId: "old-job-id",
+  })
+})
+
+test("fails closed when Cursor resumes a different session", async () => {
+  const output = await runFixture("resume-mismatch", {
+    resumeSessionId: "cursor-session-to-resume",
+    resumedFromJobId: "old-job-id",
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.deepEqual(output.result.reasons, ["CURSOR_SESSION_RESUME_MISMATCH"])
+  assert.equal(output.result.cursorSession, null)
+})
+
+test("fails closed when a resumed Cursor session does not initialize", async () => {
+  const output = await runFixture("resume-missing", {
+    resumeSessionId: "cursor-session-to-resume",
+    resumedFromJobId: "old-job-id",
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.deepEqual(output.result.reasons, ["CURSOR_SESSION_RESUME_FAILED"])
+  assert.equal(output.result.cursorSession, null)
 })
 
 test("allows verified source repairs", async () => {

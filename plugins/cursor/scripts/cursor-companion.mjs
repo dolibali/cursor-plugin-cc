@@ -29,6 +29,14 @@ import {
   renderTaskResult,
 } from "./lib/render.mjs"
 import {
+  createCursorStreamCollector,
+  readCursorSession,
+  readJsonIfPresent,
+  resumePolicyFromResult,
+  validCursorSessionId,
+  validateResumeRequest,
+} from "./lib/resume.mjs"
+import {
   companionHomeDir,
   generateJobId,
   listJobs,
@@ -40,6 +48,7 @@ import {
   resolveStateDir,
   saveGlobalConfig,
   upsertJob,
+  writeJsonAtomic,
 } from "./lib/state.mjs"
 import { isSystemTemporaryPath } from "./lib/system-temp.mjs"
 import { runTrackedJob } from "./lib/tracked-jobs.mjs"
@@ -62,6 +71,7 @@ function printUsage() {
     [--background] [--read-only] [--sandbox enabled|disabled] [--model <slug>]
     [--mode simple|e2e] [--timeout-ms <ms>] [--prompt-file <path>]
     [--artifact-dir <path>] [--required-check <id>]... [--optional-check <id>]...
+    [--resume-job <job-id-or-prefix>]
     [--no-progress-timeout-ms <ms>] [--long-command-timeout-ms <ms>] -- <prompt>
   node scripts/cursor-companion.mjs status [job-id] [--workspace <abs>] [--json]
   node scripts/cursor-companion.mjs result [job-id] [--workspace <abs>] [--json]
@@ -245,6 +255,7 @@ async function runProcess(command, args, options = {}) {
     let stderr = ""
     let settled = false
     let timedOut = false
+    let streamFailureCode = null
     let forceTimer = null
     let fallbackTimer = null
     let signalForceTimer = null
@@ -283,8 +294,22 @@ async function runProcess(command, args, options = {}) {
     process.once("SIGTERM", forwardSignal)
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk
+      const text = chunk.toString()
+      if (options.captureStdout !== false) stdout += text
       appendLog(options.logFile, chunk)
+      if (!options.onStdout || streamFailureCode) return
+      try {
+        streamFailureCode = options.onStdout(text) ?? null
+      } catch (error) {
+        streamFailureCode = error instanceof Error ? error.message : String(error)
+      }
+      if (streamFailureCode) {
+        terminateProcessTree(child.pid)
+        forceTimer ??= setTimeout(
+          () => forceTerminateProcessTree(child.pid),
+          TERMINATE_GRACE_MS,
+        )
+      }
     })
     child.stderr.on("data", (chunk) => {
       stderr += chunk
@@ -293,11 +318,16 @@ async function runProcess(command, args, options = {}) {
     child.on("error", (error) => finish({ exitCode: 1, stdout, stderr: error.message, timedOut: false }))
     child.on("close", (code, signal) => {
       finish({
-        exitCode: timedOut ? 124 : code ?? (signal ? 1 : 0),
+        exitCode: timedOut ? 124 : streamFailureCode ? 1 : code ?? (signal ? 1 : 0),
         stdout,
-        stderr: timedOut ? `${stderr}\ncompanion timeout after ${timeoutMs}ms` : stderr,
+        stderr: timedOut
+          ? `${stderr}\ncompanion timeout after ${timeoutMs}ms`
+          : streamFailureCode
+            ? `${stderr}\n${streamFailureCode}`
+            : stderr,
         timedOut,
         signal,
+        failureCode: streamFailureCode,
       })
     })
   })
@@ -353,6 +383,7 @@ function parseTaskRequest(argv) {
       "no-progress-timeout-ms",
       "long-command-timeout-ms",
       "agent-bin",
+      "resume-job",
     ],
     repeatableOptions: ["add-dir", "required-check", "optional-check"],
   })
@@ -392,42 +423,67 @@ function parseTaskRequest(argv) {
     artifactDir = path.resolve(options["artifact-dir"])
     if (options["read-only"]) throw new Error("--read-only is not supported with --mode e2e")
     validateE2EPaths(workspaceRoots.all, artifactDir)
-  } else if (!prompt) {
-    throw new Error("task prompt is required (pass after -- or use --prompt-file)")
-  } else if (
-    options["artifact-dir"]
-    || options["required-check"]?.length
-    || options["optional-check"]?.length
-    || noProgressTimeoutMs
-    || longCommandTimeoutMs
-  ) {
-    throw new Error("--artifact-dir, check options, and progress timeouts require --mode e2e")
+  } else {
+    if (!prompt) {
+      throw new Error("task prompt is required (pass after -- or use --prompt-file)")
+    }
+    if (
+      options["artifact-dir"]
+      || options["required-check"]?.length
+      || options["optional-check"]?.length
+      || noProgressTimeoutMs
+      || longCommandTimeoutMs
+    ) {
+      throw new Error("--artifact-dir, check options, and progress timeouts require --mode e2e")
+    }
   }
 
-  const modelInfo = resolveModel(options.model)
+  const request = {
+    mode,
+    sandbox,
+    hostAccess: sandbox === "disabled" ? "unrestricted" : "workspace",
+    workspace: workspaceRoots.primary,
+    addDirs: workspaceRoots.additional,
+    workspaceRoots: workspaceRoots.all,
+    background: Boolean(options.background),
+    readOnly: Boolean(options["read-only"]),
+    timeoutMs,
+    noProgressTimeoutMs,
+    longCommandTimeoutMs,
+    prompt,
+    promptFile,
+    artifactDir,
+    requiredChecks: options["required-check"] ?? [],
+    optionalChecks: options["optional-check"] ?? [],
+    agentBin: options["agent-bin"] ?? null,
+    resumeJobId: null,
+    resumeSessionId: null,
+  }
+  let modelInfo
+  if (options["resume-job"]) {
+    const oldJob = reconcileJob(
+      request.workspace,
+      resolveTargetJob(request.workspace, options["resume-job"]),
+    )
+    const resume = validateResumeRequest({
+      oldJob,
+      request,
+      explicitModel: options.model,
+    })
+    request.resumeJobId = oldJob.id
+    request.resumeSessionId = resume.cursorSession.id
+    modelInfo = {
+      model: oldJob.model ?? null,
+      source: options.model == null ? "resume" : "cli",
+    }
+  } else {
+    modelInfo = resolveModel(options.model)
+  }
+  request.model = modelInfo.model
+  request.modelSource = modelInfo.source
   return {
     outputJson: Boolean(options.json),
-    request: {
-      mode,
-      sandbox,
-      hostAccess: sandbox === "disabled" ? "unrestricted" : "workspace",
-      workspace: workspaceRoots.primary,
-      addDirs: workspaceRoots.additional,
-      workspaceRoots: workspaceRoots.all,
-      model: modelInfo.model,
-      modelSource: modelInfo.source,
-      background: Boolean(options.background),
-      readOnly: Boolean(options["read-only"]),
-      timeoutMs,
-      noProgressTimeoutMs,
-      longCommandTimeoutMs,
-      prompt,
-      promptFile,
-      artifactDir,
-      requiredChecks: options["required-check"] ?? [],
-      optionalChecks: options["optional-check"] ?? [],
-      agentBin: options["agent-bin"] ?? null,
-    },
+    request,
   }
 }
 
@@ -456,17 +512,43 @@ async function executeSimple(request, logFile) {
       readOnly: request.readOnly,
       force: !request.readOnly,
       sandbox: request.sandbox,
+      streamJson: true,
+      resumeSessionId: request.resumeSessionId,
     }),
   ]
+  const stream = createCursorStreamCollector({
+    expectedSessionId: request.resumeSessionId,
+    resumedFromJobId: request.resumeJobId,
+    onSession(cursorSession) {
+      writeJsonAtomic(request.cursorSessionFile, {
+        ...cursorSession,
+        capturedAt: nowIso(),
+      })
+    },
+  })
   const result = await runProcess(invocation.command, args, {
     cwd: request.workspace,
     timeoutMs: request.timeoutMs,
     logFile,
+    captureStdout: false,
+    onStdout: (chunk) => stream.consume(chunk),
   })
+  const output = stream.finish()
+  const failureCode = result.failureCode ?? output.failureCode
+  const exitCode = failureCode && result.exitCode === 0 ? 1 : result.exitCode
   return {
     ...result,
-    stdoutPreview: previewText(result.stdout),
-    error: result.exitCode === 0 ? null : previewText(result.stderr || result.stdout),
+    exitCode,
+    stdoutPreview: previewText(output.stdout),
+    error: exitCode === 0
+      ? null
+      : previewText(result.stderr || failureCode || output.stdout),
+    failureCode,
+    cursorSession: output.cursorSession,
+    resumePolicy: output.cursorSession
+      ? { allowed: true, blockedReasons: [] }
+      : { allowed: false, blockedReasons: ["CURSOR_SESSION_UNAVAILABLE"] },
+    usage: output.usage,
     agentBin,
     request: undefined,
   }
@@ -499,6 +581,14 @@ async function executeE2E(request, logFile) {
     args.push("--long-command-timeout-ms", String(request.longCommandTimeoutMs))
   }
   if (request.model) args.push("--model", request.model)
+  if (request.resumeSessionId) {
+    args.push(
+      "--resume-session-id",
+      request.resumeSessionId,
+      "--resumed-from-job-id",
+      request.resumeJobId,
+    )
+  }
 
   const result = await runProcess(process.execPath, args, {
     cwd: request.workspace,
@@ -506,11 +596,26 @@ async function executeE2E(request, logFile) {
     logFile,
   })
   const resultFile = path.join(request.artifactDir, "run-result.json")
+  const delegatedResult = readJsonIfPresent(resultFile)
+  const cursorSession = delegatedResult?.cursorSession
+    ?? readJsonIfPresent(path.join(request.artifactDir, "cursor-session.json"))
   return {
     ...result,
     stdoutPreview: previewText(result.stdout),
     error: result.exitCode === 0 ? null : previewText(result.stderr || result.stdout),
     resultFile: fs.existsSync(resultFile) ? resultFile : null,
+    cursorSession: validCursorSessionId(cursorSession?.id)
+      ? {
+          id: cursorSession.id,
+          resumed: Boolean(cursorSession.resumed),
+          resumedFromJobId: cursorSession.resumedFromJobId ?? null,
+        }
+      : null,
+    resumePolicy: delegatedResult
+      ? resumePolicyFromResult(delegatedResult)
+      : validCursorSessionId(cursorSession?.id) && result.timedOut
+        ? { allowed: true, blockedReasons: [] }
+        : { allowed: false, blockedReasons: ["RESULT_UNAVAILABLE"] },
     agentBin,
     request: undefined,
   }
@@ -521,6 +626,7 @@ function executeRequest(request, logFile) {
 }
 
 function markCancelled(workspace, job, error = "Cancelled by user") {
+  const cursorSession = readCursorSession(job)
   return upsertJob(workspace, {
     ...job,
     status: "cancelled",
@@ -528,6 +634,10 @@ function markCancelled(workspace, job, error = "Cancelled by user") {
     pid: null,
     error,
     finishedAt: nowIso(),
+    cursorSession,
+    resumePolicy: cursorSession
+      ? (job.resumePolicy ?? { allowed: true, blockedReasons: [] })
+      : { allowed: false, blockedReasons: ["CURSOR_SESSION_UNAVAILABLE"] },
     request: undefined,
   })
 }
@@ -627,6 +737,7 @@ async function commandTask(argv) {
 
   const id = generateJobId()
   const logFile = ensureJobLog(request.workspace, id)
+  request.cursorSessionFile = path.join(resolveJobsDir(request.workspace), `${id}.cursor-session`)
   const job = upsertJob(request.workspace, {
     id,
     kind: "task",
@@ -644,6 +755,9 @@ async function commandTask(argv) {
     background: request.background,
     logFile,
     resultFile: request.artifactDir ? path.join(request.artifactDir, "run-result.json") : null,
+    artifactDir: request.artifactDir,
+    cursorSessionFile: request.cursorSessionFile,
+    resumedFromJobId: request.resumeJobId,
     createdAt: nowIso(),
     promptPreview: previewText(request.prompt, 500),
     request,
@@ -739,6 +853,7 @@ function reconcileJob(workspace, job) {
     return job
   }
   releaseArtifactClaim(job.request?.artifactDir, job.id)
+  const cursorSession = readCursorSession(job)
   return upsertJob(workspace, {
     ...job,
     status: "failed",
@@ -747,6 +862,10 @@ function reconcileJob(workspace, job) {
     error: "Task worker exited without writing a terminal result",
     failureCode: "WORKER_EXITED_WITHOUT_RESULT",
     finishedAt: nowIso(),
+    cursorSession,
+    resumePolicy: cursorSession
+      ? { allowed: false, blockedReasons: ["RESULT_UNAVAILABLE"] }
+      : { allowed: false, blockedReasons: ["CURSOR_SESSION_UNAVAILABLE"] },
     request: undefined,
   })
 }
@@ -788,13 +907,16 @@ function commandResult(argv) {
   let result = null
   if (job.resultFile && fs.existsSync(job.resultFile)) {
     result = JSON.parse(fs.readFileSync(job.resultFile, "utf8"))
-  } else if (job.logFile && fs.existsSync(job.logFile)) {
+  } else if (!job.stdoutPreview && job.logFile && fs.existsSync(job.logFile)) {
     job.stdoutPreview = previewText(fs.readFileSync(job.logFile, "utf8"))
   }
   if (options.json) outputResult({ job: publicJob(job), result }, true)
   else {
     process.stdout.write(renderTaskResult(job))
-    if (result) process.stdout.write(`\n--- result file ---\n${JSON.stringify(result, null, 2)}\n`)
+    if (result) {
+      const { cursorSession: _cursorSession, ...humanResult } = result
+      process.stdout.write(`\n--- result file ---\n${JSON.stringify(humanResult, null, 2)}\n`)
+    }
   }
   return job.status === "completed" ? 0 : 1
 }

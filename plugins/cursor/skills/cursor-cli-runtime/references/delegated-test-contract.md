@@ -22,6 +22,24 @@ node "$COMPANION" task --mode e2e \
 
 Repeat `--required-check` and `--optional-check` to define the authoritative checklist.
 
+For a follow-up on the same development goal, create a new job and artifact
+directory while explicitly reusing the prior Cursor conversation:
+
+```bash
+node "$COMPANION" task --mode e2e \
+  --resume-job <prior-job-id-or-unique-prefix> \
+  --workspace <same-absolute-git-workspace> \
+  [--add-dir <same-absolute-git-workspace>]... \
+  --prompt-file <incremental-follow-up-prompt> \
+  --artifact-dir <new-absolute-system-temp-directory> \
+  --required-check <stable-check-id>
+```
+
+The prior job must be terminal, safe to resume, and have a captured Cursor
+session. Primary workspace, add-dir set, sandbox, and model must match. The
+companion never chooses a recent job automatically and never falls back to a
+new Cursor conversation when resume fails.
+
 Defaults:
 
 - model: unset by default (Cursor CLI `auto`); override with `--model` / env / config;
@@ -177,11 +195,30 @@ When Cursor emits usage counters, `run-result.json` also records input, output, 
 The Runner writes:
 
 - `delegation.json`;
+- `cursor-session.json` immediately after Cursor emits `system/init.session_id`;
 - `events.jsonl`, `stdout.log`, and `stderr.log`;
 - `progress.jsonl` and `worker-progress.jsonl`;
 - `recursion-attempts.log` and `git-guard-attempts.log`;
 - `agent-result.json` and authoritative `run-result.json`;
 - `attempted-repair.patch` when source changes occur.
+
+`run-result.json` and companion job JSON expose:
+
+```json
+{
+  "cursorSession": {
+    "id": "cursor-chat-id",
+    "resumed": true,
+    "resumedFromJobId": "prior-companion-job-id"
+  }
+}
+```
+
+Each resumed pass has a new companion job, Worker process, and artifact
+directory. Only the Cursor service conversation is reused. Session mismatch,
+expiry, or missing initialization is BLOCKED and never silently starts a new
+conversation. Jobs stopped for Git metadata, workspace-boundary, recursive
+delegation, detached-process, or result-integrity violations cannot be resumed.
 
 The parent reads `run-result.json` first. Full stream and heartbeat output stay on disk. Read referenced logs only when the result is not a clean PASS or requests a major decision.
 

@@ -139,7 +139,7 @@ export function listJobs(cwd) {
   return pruneJobs([...byId.values()])
 }
 
-function writeJsonAtomic(file, value) {
+export function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8")

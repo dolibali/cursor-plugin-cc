@@ -18,6 +18,7 @@ import {
 } from "node:fs/promises"
 import path from "node:path"
 
+import { cursorSessionFromInit, validCursorSessionId } from "./lib/resume.mjs"
 import { isSystemTemporaryPath } from "./lib/system-temp.mjs"
 
 const DEFAULT_MODEL = null // leave unset → Cursor CLI auto
@@ -46,7 +47,17 @@ function usage() {
     [--required-check <id>]... [--optional-check <id>]...
     [--model <slug>] [--timeout-ms <ms>]
     [--no-progress-timeout-ms <ms>] [--long-command-timeout-ms <ms>]
+    [--resume-session-id <id>] [--resumed-from-job-id <job-id>]
     [--agent-bin <path>]`
+}
+
+function validateCursorSessionId(value, flag) {
+  if (value == null) return null
+  const sessionId = String(value).trim()
+  if (!validCursorSessionId(sessionId)) {
+    throw new Error(`${flag} contains an invalid Cursor session ID`)
+  }
+  return sessionId
 }
 
 function parsePositiveInteger(value, flag) {
@@ -69,6 +80,8 @@ function parseArgs(argv) {
     requiredChecks: [],
     optionalChecks: [],
     sandbox: "enabled",
+    resumeSessionId: null,
+    resumedFromJobId: null,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
@@ -111,6 +124,12 @@ function parseArgs(argv) {
       case "--optional-check":
         result.optionalChecks.push(value)
         break
+      case "--resume-session-id":
+        result.resumeSessionId = validateCursorSessionId(value, flag)
+        break
+      case "--resumed-from-job-id":
+        result.resumedFromJobId = String(value).trim()
+        break
       default:
         throw new Error(`Unknown argument: ${flag}\n${usage()}`)
     }
@@ -130,6 +149,9 @@ function parseArgs(argv) {
   }
   const overlappingCheck = result.requiredChecks.find((id) => result.optionalChecks.includes(id))
   if (overlappingCheck) throw new Error(`Check cannot be both required and optional: ${overlappingCheck}`)
+  if (Boolean(result.resumeSessionId) !== Boolean(result.resumedFromJobId)) {
+    throw new Error("--resume-session-id and --resumed-from-job-id must be provided together")
+  }
   result.timeoutMs ??= DEFAULT_TIMEOUT_MS
   result.noProgressTimeoutMs ??= DEFAULT_NO_PROGRESS_TIMEOUT_MS
   result.longCommandTimeoutMs ??= DEFAULT_LONG_COMMAND_TIMEOUT_MS
@@ -725,6 +747,7 @@ async function validateAgentResult(value, requiredChecks, optionalChecks, artifa
 
 function deriveStatus({
   timedOut,
+  sessionFailure,
   exitCode,
   agentResult,
   validation,
@@ -741,6 +764,10 @@ function deriveStatus({
   if (workspaceGuard.violations.length > 0) {
     reasons.push("PROHIBITED_GIT_STATE_CHANGE", ...workspaceGuard.violations)
     return { overall: "FAIL", reasons }
+  }
+  if (sessionFailure) {
+    reasons.push(sessionFailure)
+    return { overall: "BLOCKED", reasons }
   }
   if (timedOut) {
     reasons.push(timedOut)
@@ -793,10 +820,14 @@ function contractPrompt({
   optionalChecks,
   workerProgressFile,
   workspaceRoots,
+  resumedFromJobId,
 }) {
   const required = requiredChecks.length > 0 ? requiredChecks.map((item) => `- ${item}`).join("\n") : "- supplied by task prompt"
   const optional = optionalChecks.length > 0 ? optionalChecks.map((item) => `- ${item}`).join("\n") : "- none"
-  return `${taskPrompt.trim()}
+  const continuation = resumedFromJobId
+    ? `This run resumes Cursor context from companion job ${resumedFromJobId}. Re-read the current worktree and treat its on-disk state, current diff, checks, and fresh artifact directory as authoritative. The task prompt below contains only this continuation's incremental instructions.\n\n`
+    : ""
+  return `${continuation}${taskPrompt.trim()}
 
 ---
 
@@ -885,6 +916,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   const eventsPath = path.join(artifactDir, "events.jsonl")
   const progressPath = path.join(artifactDir, "progress.jsonl")
   const workerProgressPath = path.join(artifactDir, "worker-progress.jsonl")
+  const cursorSessionPath = path.join(artifactDir, "cursor-session.json")
   await Promise.all([
     writeFile(stdoutPath, ""),
     writeFile(stderrPath, ""),
@@ -908,6 +940,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     "stream-json",
     "--stream-partial-output",
     ...(config.model ? ["--model", config.model] : []),
+    ...(config.resumeSessionId ? ["--resume", config.resumeSessionId] : []),
     "--workspace",
     workspace,
   ]
@@ -921,6 +954,8 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   let stdoutBuffer = ""
   let lastPhase = ""
   let usage = null
+  let cursorSession = null
+  let sessionFailure = null
   const autonomousState = {
     lastMeaningfulProgressAt: startedAt,
     workerProgressLines: 0,
@@ -937,6 +972,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     [eventsPath, Promise.resolve()],
   ])
   let progressQueue = Promise.resolve()
+  let sessionWriteQueue = Promise.resolve()
   const enqueueWrite = (target, chunk) => {
     const next = writeQueues.get(target).then(() => appendFile(target, chunk))
     writeQueues.set(target, next.catch(() => {}))
@@ -951,6 +987,25 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   const inspectStreamLine = (line) => {
     try {
       const event = JSON.parse(line)
+      const sessionResult = cursorSessionFromInit(event, {
+        expectedSessionId: config.resumeSessionId,
+        resumedFromJobId: config.resumedFromJobId,
+        currentSession: cursorSession,
+      })
+      if (sessionResult?.failureCode) {
+        sessionFailure = sessionResult.failureCode
+        terminate(sessionFailure).catch(() => {})
+        return
+      }
+      if (sessionResult?.cursorSession) {
+        cursorSession = sessionResult.cursorSession
+        sessionWriteQueue = sessionWriteQueue.then(() =>
+          writeJsonAtomic(cursorSessionPath, {
+            ...cursorSession,
+            capturedAt: new Date().toISOString(),
+          }),
+        )
+      }
       if (event.type === "result" && event.usage && typeof event.usage === "object") {
         usage = {
           inputTokens: Number(event.usage.inputTokens) || 0,
@@ -1169,6 +1224,11 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   process.off("SIGINT", handleSigint)
   process.off("SIGTERM", handleSigterm)
   if (stdoutBuffer) inspectStreamLine(stdoutBuffer)
+  if (!cursorSession && !timedOut) {
+    sessionFailure = config.resumeSessionId
+      ? "CURSOR_SESSION_RESUME_FAILED"
+      : "CURSOR_SESSION_CAPTURE_FAILED"
+  }
   await readWorkerProgress(workerProgressPath, autonomousState, config, enqueueProgress)
   autonomousState.blockedAttempts = Math.max(
     autonomousState.blockedAttempts,
@@ -1182,7 +1242,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     autonomousState.blockedGitAttempts,
     await gitGuardAttemptCount(config.workspaceGuard.attemptsPath),
   )
-  await Promise.all([...writeQueues.values()])
+  await Promise.all([...writeQueues.values(), sessionWriteQueue])
   await enqueueProgress({
     type: "runner.agentExit",
     code: processResult.code,
@@ -1215,6 +1275,8 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       blockedAttempts: autonomousState.blockedGitAttempts,
     },
     usage,
+    cursorSession,
+    sessionFailure,
   }
 }
 
@@ -1314,6 +1376,15 @@ async function main() {
     processGuardMs: PROCESS_GUARD_MS,
     requiredChecks: config.requiredChecks,
     optionalChecks: config.optionalChecks,
+    cursorSession: config.resumeSessionId
+      ? {
+          resumed: true,
+          resumedFromJobId: config.resumedFromJobId,
+        }
+      : {
+          resumed: false,
+          resumedFromJobId: null,
+        },
     source: before,
     sources: beforeWorkspaces,
     workspaceGuard: {
@@ -1331,6 +1402,7 @@ async function main() {
     optionalChecks: config.optionalChecks,
     workerProgressFile: path.join(artifactDir, "worker-progress.jsonl"),
     workspaceRoots,
+    resumedFromJobId: config.resumedFromJobId,
   })
   const processResult = await runAgent({
     config,
@@ -1421,6 +1493,7 @@ async function main() {
     : { valid: false, reason: `agent-result.json unavailable: ${parseError}` }
   const derived = deriveStatus({
     timedOut: processResult.timedOut,
+    sessionFailure: processResult.sessionFailure,
     exitCode: processResult.code,
     agentResult,
     validation,
@@ -1449,6 +1522,7 @@ async function main() {
       timedOut: processResult.timedOut,
     },
     usage: processResult.usage,
+    cursorSession: processResult.cursorSession,
     source: {
       before,
       after,

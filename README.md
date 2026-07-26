@@ -87,6 +87,23 @@ Sandbox mode never falls back to unrestricted access. Use
 `--sandbox disabled` only when the caller intentionally accepts host-wide
 access.
 
+### Continue a task
+
+Both ordinary and E2E tasks can explicitly continue the same Cursor
+conversation. A continuation creates a new companion job and process while
+reusing only Cursor's session context:
+
+```bash
+node "$COMPANION" task \
+  --workspace /abs/repo \
+  --resume-job <prior-job-id-or-unique-prefix> \
+  -- "Continue after the parent-side changes and re-read the worktree"
+```
+
+The source mode, workspace roots, sandbox, model, and ordinary-task read-only
+setting must match. Resume never picks a job implicitly and never falls back to
+a new Cursor conversation.
+
 ### Delegated E2E
 
 ```bash
@@ -101,6 +118,22 @@ node "$COMPANION" task --mode e2e \
 
 Artifacts must be under the system temporary directory and outside every
 workspace. See the delegated-test contract bundled with the runtime skill.
+
+Follow-up E2E validation for the same development goal can reuse Cursor's
+conversation while keeping a new companion job, Worker, and artifact directory:
+
+```bash
+node "$COMPANION" task --mode e2e \
+  --resume-job <prior-job-id-or-unique-prefix> \
+  --workspace /abs/git-repo \
+  --add-dir /abs/second-git-repo \
+  --prompt-file /abs/incremental-follow-up.md \
+  --artifact-dir /tmp/cursor-e2e-follow-up \
+  --required-check gui
+```
+
+E2E resume additionally requires a safely terminated source result and a new,
+unused artifact directory.
 
 ## Tests
 
@@ -118,6 +151,14 @@ npm run test:live:codex
 It installs this checkout, creates a temporary Git repository, asks Cursor to
 write one deterministic file, verifies `task`, `status`, and `result`, and
 retains compact artifacts under the system temporary directory.
+
+The live resume smoke test verifies ordinary and E2E continuation against the
+installed companion. It checks `--resume`, session identity, incremental
+context, and E2E artifact isolation:
+
+```bash
+npm run test:live:resume
+```
 
 ## License
 

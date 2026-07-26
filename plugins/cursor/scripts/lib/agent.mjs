@@ -74,12 +74,16 @@ export function buildAgentArgs({
   readOnly = false,
   force = true,
   sandbox = "enabled",
+  streamJson = false,
+  resumeSessionId = null,
 }) {
   const args = ["-p", "--trust", "--sandbox", sandbox, "--workspace", workspace]
   for (const directory of addDirs) args.push("--add-dir", directory)
   if (model) args.push("--model", model)
   if (readOnly) args.push("--mode", "ask")
   else if (force) args.push("--force")
+  if (streamJson) args.push("--output-format", "stream-json", "--stream-partial-output")
+  if (resumeSessionId) args.push("--resume", resumeSessionId)
   args.push(prompt)
   return args
 }

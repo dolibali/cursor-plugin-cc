@@ -18,7 +18,29 @@ if (args.includes("--help") || args.includes("status")) {
 
 const prompt = args.filter((a) => !a.startsWith("-")).pop() || ""
 const out = `FAKE_AGENT_OK prompt=${prompt.slice(0, 80)} mode=${mode}\n`
-process.stdout.write(out)
+const resumeIndex = args.indexOf("--resume")
+const requestedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : null
+const sessionId = mode === "resume-mismatch"
+  ? "different-fake-simple-session"
+  : requestedSessionId ?? process.env.FAKE_CURSOR_SESSION_ID ?? "fake-simple-session"
+if (args.includes("stream-json")) {
+  if (mode !== "resume-missing") {
+    process.stdout.write(`${JSON.stringify({
+      type: "system",
+      subtype: "init",
+      session_id: sessionId,
+    })}\n`)
+  }
+  process.stdout.write(`${JSON.stringify({
+    type: "result",
+    subtype: "success",
+    result: out.trim(),
+    session_id: sessionId,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  })}\n`)
+} else {
+  process.stdout.write(out)
+}
 if (process.env.FAKE_AGENT_PID_FILE) {
   fs.writeFileSync(process.env.FAKE_AGENT_PID_FILE, `${process.pid}\n`)
 }

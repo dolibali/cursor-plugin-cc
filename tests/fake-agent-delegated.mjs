@@ -19,6 +19,16 @@ const workspace = process.env.DELEGATED_TEST_WORKSPACE
 const workspaces = JSON.parse(process.env.DELEGATED_TEST_WORKSPACES ?? `["${workspace}"]`)
 const mode = process.env.FAKE_AGENT_MODE ?? "pass"
 const progressFile = process.env.DELEGATED_TEST_PROGRESS_FILE
+const resumeIndex = args.indexOf("--resume")
+const requestedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : null
+const defaultSessionId = process.env.FAKE_CURSOR_SESSION_ID ?? "fake-cursor-session"
+const emittedSessionId = mode === "resume-mismatch"
+  ? "different-fake-cursor-session"
+  : requestedSessionId ?? defaultSessionId
+
+if (process.env.FAKE_AGENT_ARGV_LOG) {
+  await writeFile(process.env.FAKE_AGENT_ARGV_LOG, `${JSON.stringify(args, null, 2)}\n`)
+}
 
 async function progress(event) {
   if (progressFile) await appendFile(progressFile, `${JSON.stringify(event)}\n`)
@@ -29,7 +39,13 @@ async function childExit(command, args) {
   return new Promise((resolve) => child.once("exit", resolve))
 }
 
-process.stdout.write(`${JSON.stringify({ type: "system", subtype: "init" })}\n`)
+if (mode !== "resume-missing") {
+  process.stdout.write(`${JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: emittedSessionId,
+  })}\n`)
+}
 process.stdout.write(`${JSON.stringify({
   type: "tool_call",
   subtype: "started",

@@ -83,6 +83,45 @@ function createGitWorkspace(parent, name) {
   return workspace
 }
 
+function writeResumeSourceJob(workspace, overrides = {}) {
+  const canonicalWorkspace = fs.realpathSync(workspace)
+  const artifactDir = overrides.artifactDir ?? fs.mkdtempSync(
+    path.join(os.tmpdir(), "cursor-companion-resume-source-"),
+  )
+  const job = {
+    id: overrides.id ?? "resume-source-job",
+    kind: "task",
+    mode: "e2e",
+    status: "completed",
+    workspace: canonicalWorkspace,
+    workspaceRoots: [canonicalWorkspace],
+    addDirs: [],
+    model: null,
+    modelSource: "unset",
+    sandbox: "enabled",
+    hostAccess: "workspace",
+    artifactDir,
+    resultFile: path.join(artifactDir, "run-result.json"),
+    cursorSession: {
+      id: "fake-resumable-session",
+      resumed: false,
+      resumedFromJobId: null,
+    },
+    resumePolicy: { allowed: true, blockedReasons: [] },
+    createdAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    ...overrides,
+  }
+  const originalHome = process.env.HOME
+  process.env.HOME = TEST_HOME
+  try {
+    writeJobFile(canonicalWorkspace, job)
+  } finally {
+    process.env.HOME = originalHome
+  }
+  return job
+}
+
 test("setup --json reports model unset and fake agent", () => {
   const result = run(["setup", "--json"])
   assert.equal(result.status, 0, result.stderr)
@@ -105,6 +144,81 @@ test("task foreground with fake agent", () => {
   const job = JSON.parse(result.stdout)
   assert.equal(job.status, "completed")
   assert.match(job.stdoutPreview || "", /FAKE_AGENT_OK/)
+  assert.equal(job.cursorSession.id, "fake-simple-session")
+})
+
+test("resumes a simple task in the same Cursor session with a new companion job", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-simple-resume-"))
+  const first = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--model",
+    "cursor-test-model",
+    "--json",
+    "--",
+    "remember the first request",
+  ], { FAKE_CURSOR_SESSION_ID: "simple-resume-session" })
+  assert.equal(first.status, 0, first.stderr + first.stdout)
+  const firstJob = JSON.parse(first.stdout)
+  const argsLog = path.join(os.tmpdir(), `cursor-simple-resume-${process.pid}-${Date.now()}.json`)
+
+  const second = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--resume-job",
+    firstJob.id.slice(0, 12),
+    "--json",
+    "--",
+    "continue with the follow-up",
+  ], { FAKE_AGENT_ARGV_LOG: argsLog })
+  assert.equal(second.status, 0, second.stderr + second.stdout)
+  const secondJob = JSON.parse(second.stdout)
+  const agentArgs = JSON.parse(fs.readFileSync(argsLog, "utf8"))
+  assert.notEqual(secondJob.id, firstJob.id)
+  assert.equal(secondJob.resumedFromJobId, firstJob.id)
+  assert.equal(secondJob.model, "cursor-test-model")
+  assert.equal(secondJob.modelSource, "resume")
+  assert.deepEqual(secondJob.cursorSession, {
+    id: "simple-resume-session",
+    resumed: true,
+    resumedFromJobId: firstJob.id,
+  })
+  assert.deepEqual(agentArgs.slice(agentArgs.indexOf("--resume"), agentArgs.indexOf("--resume") + 2), [
+    "--resume",
+    "simple-resume-session",
+  ])
+})
+
+test("simple resume fails closed on a session mismatch", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-simple-mismatch-"))
+  const first = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--json",
+    "--",
+    "capture the initial session",
+  ], { FAKE_CURSOR_SESSION_ID: "expected-simple-session" })
+  assert.equal(first.status, 0, first.stderr + first.stdout)
+  const firstJob = JSON.parse(first.stdout)
+
+  const resumed = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--resume-job",
+    firstJob.id,
+    "--json",
+    "--",
+    "continue",
+  ], { FAKE_AGENT_MODE: "resume-mismatch" })
+  assert.notEqual(resumed.status, 0)
+  const resumedJob = JSON.parse(resumed.stdout)
+  assert.equal(resumedJob.status, "failed")
+  assert.equal(resumedJob.failureCode, "CURSOR_SESSION_RESUME_MISMATCH")
+  assert.equal(resumedJob.cursorSession, null)
 })
 
 test("model cli override wins", () => {
@@ -296,7 +410,10 @@ test("background jobs write a terminal result that status and result can read", 
   assert.equal("request" in job, false)
   const result = run(["result", jobId, "--workspace", workspace, "--json"])
   assert.equal(result.status, 0, result.stderr)
-  assert.equal(JSON.parse(result.stdout).job.status, "completed")
+  const resultJob = JSON.parse(result.stdout).job
+  assert.equal(resultJob.status, "completed")
+  assert.match(resultJob.stdoutPreview, /FAKE_AGENT_OK/)
+  assert.doesNotMatch(resultJob.stdoutPreview, /"type":"system"/)
 })
 
 test("background failures reach a stable failed terminal state", () => {
@@ -372,7 +489,10 @@ test("cancel terminates the background worker and active Cursor process tree", (
 
   const cancelled = run(["cancel", jobId, "--workspace", workspace, "--json"])
   assert.equal(cancelled.status, 0, cancelled.stderr)
-  assert.equal(JSON.parse(cancelled.stdout).status, "cancelled")
+  const cancelledJob = JSON.parse(cancelled.stdout)
+  assert.equal(cancelledJob.status, "cancelled")
+  assert.equal(cancelledJob.cursorSession.id, "fake-simple-session")
+  assert.equal(cancelledJob.resumePolicy.allowed, true)
   for (let attempt = 0; attempt < 80 && isProcessAlive(agentPid); attempt += 1) wait(25)
   assert.equal(isProcessAlive(agentPid), false)
   const terminal = waitForJob(workspace, jobId, ["cancelled"])
@@ -557,4 +677,301 @@ test("e2e mode forwards roots, checks, sandbox, and timeout boundaries to the ru
   assert.equal(delegation.timeoutMs, 5000)
   assert.equal(delegation.noProgressTimeoutMs, 2000)
   assert.equal(delegation.longCommandTimeoutMs, 1500)
+})
+
+test("resumes an explicit E2E job into a new job and artifact directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-resume-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const additional = createGitWorkspace(root, "additional")
+  const firstPrompt = path.join(root, "first.md")
+  const secondPrompt = path.join(root, "second.md")
+  const firstArtifact = path.join(root, "first-artifacts")
+  const secondArtifact = path.join(root, "second-artifacts")
+  fs.writeFileSync(firstPrompt, "Run the first deterministic validation.\n")
+  fs.writeFileSync(secondPrompt, "Re-read the worktree and rerun the affected check.\n")
+
+  const first = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--add-dir",
+    additional,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    firstPrompt,
+    "--artifact-dir",
+    firstArtifact,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--model",
+    "cursor-test-model",
+    "--json",
+  ], { FAKE_AGENT_MODE: "pass", FAKE_CURSOR_SESSION_ID: "live-resume-session" })
+  assert.equal(first.status, 0, first.stderr + first.stdout)
+  const firstJob = JSON.parse(first.stdout)
+  assert.equal(firstJob.cursorSession.id, "live-resume-session")
+  assert.equal(firstJob.resumePolicy.allowed, true)
+  const firstResultBefore = fs.readFileSync(path.join(firstArtifact, "run-result.json"), "utf8")
+
+  const second = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--add-dir",
+    additional,
+    "--mode",
+    "e2e",
+    "--resume-job",
+    firstJob.id.slice(0, 12),
+    "--prompt-file",
+    secondPrompt,
+    "--artifact-dir",
+    secondArtifact,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--json",
+  ], { FAKE_AGENT_MODE: "pass" })
+  assert.equal(second.status, 0, second.stderr + second.stdout)
+  const secondJob = JSON.parse(second.stdout)
+  assert.notEqual(secondJob.id, firstJob.id)
+  assert.equal(secondJob.resumedFromJobId, firstJob.id)
+  assert.deepEqual(secondJob.cursorSession, {
+    id: "live-resume-session",
+    resumed: true,
+    resumedFromJobId: firstJob.id,
+  })
+  assert.equal(secondJob.artifactDir, secondArtifact)
+  assert.equal(secondJob.model, "cursor-test-model")
+  assert.equal(secondJob.modelSource, "resume")
+  assert.equal(fs.readFileSync(path.join(firstArtifact, "run-result.json"), "utf8"), firstResultBefore)
+  const status = run(["status", secondJob.id, "--workspace", workspace, "--json"])
+  assert.equal(status.status, 0, status.stderr)
+  assert.equal(JSON.parse(status.stdout).cursorSession.id, "live-resume-session")
+  const result = run(["result", secondJob.id, "--workspace", workspace, "--json"])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).result.cursorSession.id, "live-resume-session")
+  const humanResult = run(["result", secondJob.id, "--workspace", workspace])
+  assert.equal(humanResult.status, 0, humanResult.stderr)
+  assert.match(humanResult.stdout, new RegExp(`resumedFrom: ${firstJob.id}`))
+  assert.doesNotMatch(humanResult.stdout, /live-resume-session/)
+})
+
+test("accepts every safely terminated E2E status as an explicit resume source", () => {
+  for (const status of ["completed", "failed", "timeout", "cancelled"]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `cursor-companion-resume-${status}-`))
+    const workspace = createGitWorkspace(root, "workspace")
+    const promptFile = path.join(root, "prompt.md")
+    const artifactDir = path.join(root, "new-artifacts")
+    fs.writeFileSync(promptFile, "Continue the deterministic validation.\n")
+    const source = writeResumeSourceJob(workspace, {
+      id: `source-${status}`,
+      status,
+      cursorSession: {
+        id: `session-${status}`,
+        resumed: false,
+        resumedFromJobId: null,
+      },
+    })
+    const resumed = run([
+      "task",
+      "--workspace",
+      workspace,
+      "--mode",
+      "e2e",
+      "--resume-job",
+      source.id,
+      "--prompt-file",
+      promptFile,
+      "--artifact-dir",
+      artifactDir,
+      "--required-check",
+      "fake-check",
+      "--agent-bin",
+      FAKE_DELEGATED_AGENT,
+      "--json",
+    ], { FAKE_AGENT_MODE: "pass" })
+    assert.equal(resumed.status, 0, resumed.stderr + resumed.stdout)
+    assert.equal(JSON.parse(resumed.stdout).cursorSession.id, `session-${status}`)
+  }
+})
+
+test("captures a cancelled E2E session so a later job can resume it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-resume-cancel-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const firstPrompt = path.join(root, "first.md")
+  const secondPrompt = path.join(root, "second.md")
+  const firstArtifact = path.join(root, "first-artifacts")
+  const secondArtifact = path.join(root, "second-artifacts")
+  fs.writeFileSync(firstPrompt, "Wait for cancellation after initializing.\n")
+  fs.writeFileSync(secondPrompt, "Continue after the parent-side repair.\n")
+  const queued = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--prompt-file",
+    firstPrompt,
+    "--artifact-dir",
+    firstArtifact,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--background",
+    "--json",
+  ], { FAKE_AGENT_MODE: "sleep", FAKE_CURSOR_SESSION_ID: "cancelled-session" })
+  assert.equal(queued.status, 0, queued.stderr)
+  const firstJob = JSON.parse(queued.stdout)
+  const sessionFile = path.join(firstArtifact, "cursor-session.json")
+  for (let attempt = 0; attempt < 60 && !fs.existsSync(sessionFile); attempt += 1) wait(50)
+  assert.equal(fs.existsSync(sessionFile), true)
+
+  const cancelled = run(["cancel", firstJob.id, "--workspace", workspace, "--json"])
+  assert.equal(cancelled.status, 0, cancelled.stderr)
+  const cancelledJob = JSON.parse(cancelled.stdout)
+  assert.equal(cancelledJob.cursorSession.id, "cancelled-session")
+  assert.equal(cancelledJob.resumePolicy.allowed, true)
+
+  const resumed = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--resume-job",
+    firstJob.id,
+    "--prompt-file",
+    secondPrompt,
+    "--artifact-dir",
+    secondArtifact,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+    "--json",
+  ], { FAKE_AGENT_MODE: "pass" })
+  assert.equal(resumed.status, 0, resumed.stderr + resumed.stdout)
+  assert.equal(JSON.parse(resumed.stdout).cursorSession.id, "cancelled-session")
+})
+
+test("rejects unsafe or incompatible resume sources before creating a new job", () => {
+  const cases = [
+    {
+      name: "active job",
+      source: { status: "running", pid: process.pid },
+      expected: /still active/,
+    },
+    {
+      name: "legacy job without session",
+      source: { cursorSession: null },
+      expected: /no recoverable Cursor session/,
+    },
+    {
+      name: "unsafe prior result",
+      source: {
+        resumePolicy: {
+          allowed: false,
+          blockedReasons: ["PROHIBITED_GIT_OPERATION"],
+        },
+      },
+      expected: /not safe to resume: PROHIBITED_GIT_OPERATION/,
+    },
+    {
+      name: "sandbox mismatch",
+      source: { sandbox: "disabled" },
+      expected: /sandbox mode does not match/,
+    },
+    {
+      name: "additional workspace mismatch",
+      source: { addDirs: ["/different/additional-workspace"] },
+      expected: /add-dir set does not match/,
+    },
+    {
+      name: "model mismatch",
+      source: { model: "cursor-old-model" },
+      extraArgs: ["--model", "cursor-new-model"],
+      expected: /Explicit --model conflicts/,
+    },
+  ]
+  for (const [index, current] of cases.entries()) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `cursor-companion-resume-reject-${index}-`))
+    const workspace = createGitWorkspace(root, "workspace")
+    const promptFile = path.join(root, "prompt.md")
+    const artifactDir = path.join(root, "new-artifacts")
+    fs.writeFileSync(promptFile, "Continue the deterministic validation.\n")
+    const source = writeResumeSourceJob(workspace, {
+      id: `source-${index}`,
+      ...current.source,
+    })
+    const resumed = run([
+      "task",
+      "--workspace",
+      workspace,
+      "--mode",
+      "e2e",
+      "--resume-job",
+      source.id,
+      "--prompt-file",
+      promptFile,
+      "--artifact-dir",
+      artifactDir,
+      "--required-check",
+      "fake-check",
+      "--agent-bin",
+      FAKE_DELEGATED_AGENT,
+      ...(current.extraArgs ?? []),
+      "--json",
+    ])
+    assert.notEqual(resumed.status, 0, current.name)
+    assert.match(resumed.stderr, current.expected)
+    assert.equal(fs.existsSync(path.join(artifactDir, "delegation.json")), false)
+  }
+})
+
+test("rejects cross-mode resume and refuses to reuse an E2E artifact directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-resume-boundary-"))
+  const workspace = createGitWorkspace(root, "workspace")
+  const sourceArtifact = path.join(root, "source-artifacts")
+  fs.mkdirSync(sourceArtifact)
+  const source = writeResumeSourceJob(workspace, { artifactDir: sourceArtifact })
+
+  const simple = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--resume-job",
+    source.id,
+    "--",
+    "continue",
+  ])
+  assert.notEqual(simple.status, 0)
+  assert.match(simple.stderr, /source mode e2e does not match --mode simple/)
+
+  const promptFile = path.join(root, "prompt.md")
+  fs.writeFileSync(promptFile, "Continue the deterministic validation.\n")
+  const reused = run([
+    "task",
+    "--workspace",
+    workspace,
+    "--mode",
+    "e2e",
+    "--resume-job",
+    source.id,
+    "--prompt-file",
+    promptFile,
+    "--artifact-dir",
+    sourceArtifact,
+    "--required-check",
+    "fake-check",
+    "--agent-bin",
+    FAKE_DELEGATED_AGENT,
+  ])
+  assert.notEqual(reused.status, 0)
+  assert.match(reused.stderr, /requires a new artifact directory/)
 })

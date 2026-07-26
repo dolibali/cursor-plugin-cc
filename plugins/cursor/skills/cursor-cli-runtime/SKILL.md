@@ -76,6 +76,25 @@ terminal status. Multiple jobs may run concurrently, including against the same
 workspace. Preserve each returned job ID and use it for later result or cancel
 operations. Do not silently reimplement a failed delegation.
 
+## Continue a task
+
+For a follow-up on the same goal, explicitly resume the prior job. This works
+for ordinary and E2E tasks:
+
+```bash
+node "$COMPANION" task \
+  --resume-job <prior-job-id-or-unique-prefix> \
+  --workspace <same-primary-root> \
+  --add-dir <same-additional-root> \
+  -- "<incremental follow-up>"
+```
+
+Use an incremental prompt describing the parent's latest changes and ask Cursor
+to re-read the current worktree. Do not use `--resume-job` for an independent
+goal and never infer a source job from the workspace. Resume is fail-closed:
+mode, workspace roots, sandbox, model, and ordinary-task read-only state must
+match, and Cursor must return the expected session ID.
+
 ## Delegated E2E
 
 Read [references/delegated-test-contract.md](references/delegated-test-contract.md)
@@ -85,6 +104,22 @@ before autonomous GUI repair. For ordinary delegated edits, use
 Artifacts must be under the system temporary directory and outside all
 workspace roots. Repeat `--required-check`, `--optional-check`, and `--add-dir`
 as needed.
+
+For another validation or repair pass on the same development goal, preserve
+the prior E2E job ID and add the E2E-specific artifact and check arguments:
+
+```bash
+node "$COMPANION" task --mode e2e \
+  --resume-job <prior-job-id-or-unique-prefix> \
+  --workspace <same-primary-root> \
+  --add-dir <same-additional-root> \
+  --prompt-file <incremental-instructions> \
+  --artifact-dir <new-system-temp-directory> \
+  --required-check <current-check-id>
+```
+
+Each resumed E2E Worker must use a new artifact directory. E2E security or
+result-integrity violations make the source job ineligible for continuation.
 
 ## Recursion guard
 
