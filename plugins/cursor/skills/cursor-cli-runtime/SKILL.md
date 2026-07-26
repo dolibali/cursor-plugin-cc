@@ -89,6 +89,8 @@ terminal status. Multiple jobs may run concurrently, including against the same
 workspace. Preserve each returned job ID and use it for later result or cancel
 operations. Do not silently reimplement a failed delegation.
 
+After any Cursor task finishes, inspect changes introduced by that task before replying. Use the diff and compact task result to decide whether each change is justified; keep reasonable changes, correct or revert unreasonable ones, and run the smallest affected check when the decision changes code.
+
 ## Continue a task
 
 For a follow-up on the same goal, explicitly resume the prior job. This works

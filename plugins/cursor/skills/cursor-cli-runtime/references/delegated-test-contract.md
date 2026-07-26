@@ -233,6 +233,8 @@ delegation, detached-process, or result-integrity violations cannot be resumed.
 
 The parent reads `run-result.json` first. Full stream and heartbeat output stay on disk. Read referenced logs only when the result is not a clean PASS or requests a major decision.
 
+For E2E tasks, apply the parent skill's post-task change check regardless of whether the final status is PASS, PARTIAL, BLOCKED, or FAIL. Start with the diff and the compact checks, repair iterations, and progress summaries in `run-result.json`; open only a specifically referenced artifact when the reason for a change is still unclear, and do not read full event streams or logs by default.
+
 Overall statuses retain their existing meanings:
 
 - `PASS`: all required checks and cleanup passed; repairs, if any, were verified;
