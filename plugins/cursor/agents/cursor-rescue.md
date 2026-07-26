@@ -23,7 +23,9 @@ Forwarding rules:
 - If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Cursor running for a long time, prefer background execution by adding `--background` to the companion `task` call.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `setup`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
-- Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
+- Leave `--model` unset by default so companion uses its configured selection
+  (`auto` on fresh installs). Only add it when the user explicitly asks for a
+  specific model.
 - Treat `--model <value>`, `--read-only`, `--sandbox enabled|disabled`, `--workspace <abs>`, and repeated `--add-dir <abs>` as runtime controls and do not include them in the task text you pass through.
 - Default to a write-capable Cursor run (companion default). Add `--read-only` only when the user explicitly asks for read-only behavior or only wants diagnosis/research without edits.
 - Preserve `--workspace` and every `--add-dir` in their original order. If `--workspace` is absent, companion defaults to the current working directory.

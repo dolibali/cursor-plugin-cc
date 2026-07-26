@@ -47,9 +47,10 @@ access or the task demonstrably requires writes outside every declared root.
 Never disable sandbox merely because a task spans repositories; use repeated
 `--add-dir`. Sandbox mode must fail closed when unsupported.
 
-Leave `--model` unset by default. Selection priority is CLI, environment,
-global config, then Cursor's default. See [models.md](models.md) only when a
-specific model is requested.
+Leave `--model` unset in task commands to use the effective selection.
+Selection priority is CLI, environment, global config, then `auto`. Fresh
+installations store `auto` in the global config. See [models.md](models.md) only
+when a specific model is requested.
 
 ## Waiting and background jobs
 

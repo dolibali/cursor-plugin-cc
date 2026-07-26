@@ -42,8 +42,8 @@ new Cursor conversation when resume fails.
 
 Defaults:
 
-- model: unset by default (Cursor CLI `auto`); override with `--model` / env / config;
-- total timeout: effective global value from `setup --json` (default 3 hours);
+- model: `auto` by default; override with `--model` / env / config;
+- total timeout: effective global value from `setup --json` (default 1 hour);
 - no-meaningful-progress timeout: 30 minutes;
 - declared long-command maximum: 30 minutes;
 - artifact heartbeat: 30 seconds;

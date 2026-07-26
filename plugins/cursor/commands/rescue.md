@@ -25,6 +25,7 @@ Operating rules:
 - Return the Cursor companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, poll `/cursor:status`, fetch `/cursor:result`, call `/cursor:cancel`, summarize output, or do follow-up work of its own.
-- Leave the model unset unless the user explicitly asks for one.
+- Leave `--model` unset unless the user explicitly asks for one; the companion
+  then uses its configured default (`auto` on fresh installs).
 - If the helper reports that Cursor Agent CLI is missing or unauthenticated, stop and tell the user to run `/cursor:setup`.
 - If the user did not supply a request, ask what Cursor should investigate or fix.

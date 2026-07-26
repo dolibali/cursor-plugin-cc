@@ -14,7 +14,7 @@ The table below is a convenience map only; available models depend on the accoun
 
 | User phrasing | Slug |
 |---|---|
-| (unset) | omit `--model` (CLI default / `auto`) |
+| Default | omit `--model` (global config defaults to `auto`) |
 | Grok / Grok 4.5 / High Fast / Cursor Grok 4.5 High Fast | `cursor-grok-4.5-high-fast` |
 
 ## Common alternatives
@@ -31,6 +31,6 @@ The table below is a convenience map only; available models depend on the accoun
 
 ## Rules
 
-1. Leave `--model` unset by default (Cursor CLI default / `auto`). Pass a model only when the user, env `CURSOR_COMPANION_MODEL`, or `~/.cursor/cursor-companion/config.json` specifies one.
+1. Leave `--model` unset in task commands to use the effective selection. Fresh installations store `auto`; CLI and environment overrides still take priority.
 2. When the user gives a display name, match it to a slug from `--list-models` before passing `--model`.
 3. Parameterized models may use brackets when the CLI supports them, e.g. `'claude-opus-4-8[context=1m,effort=high,fast=false]'`. Do not invent parameters; use listed slugs when unsure.

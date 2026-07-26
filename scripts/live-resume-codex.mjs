@@ -25,7 +25,7 @@ function run(command, args, options = {}) {
     cwd: options.cwd ?? root,
     encoding: "utf8",
     env: process.env,
-    timeout: options.timeout ?? 3 * 60 * 60 * 1000,
+    timeout: options.timeout ?? 60 * 60 * 1000,
   })
 }
 

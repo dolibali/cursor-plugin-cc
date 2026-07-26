@@ -41,7 +41,37 @@ test("installer is idempotent and preserves unrelated config", () => {
     model: "test-model",
     custom: true,
     companionScript: expectedCompanion,
+    timeoutMs: 60 * 60 * 1_000,
   })
+})
+
+test("fresh install writes auto model and one-hour timeout defaults", () => {
+  const home = createHome()
+  const result = run(installer, [], home)
+  assert.equal(result.status, 0, result.stderr)
+  const config = JSON.parse(
+    fs.readFileSync(path.join(home, ".cursor", "cursor-companion", "config.json"), "utf8"),
+  )
+  assert.deepEqual(config, {
+    companionScript: expectedCompanion,
+    model: "auto",
+    timeoutMs: 60 * 60 * 1_000,
+  })
+})
+
+test("installer preserves existing model and timeout", () => {
+  const home = createHome()
+  const configDir = path.join(home, ".cursor", "cursor-companion")
+  fs.mkdirSync(configDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    '{"model":"custom-model","timeoutMs":7200000}\n',
+  )
+  const result = run(installer, [], home)
+  assert.equal(result.status, 0, result.stderr)
+  const config = JSON.parse(fs.readFileSync(path.join(configDir, "config.json"), "utf8"))
+  assert.equal(config.model, "custom-model")
+  assert.equal(config.timeoutMs, 7_200_000)
 })
 
 test("installer replaces only foreign symlinks when explicitly requested", () => {

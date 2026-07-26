@@ -5,7 +5,7 @@ export function renderSetupReport(payload) {
     `- agent: ${payload.agent?.available ? payload.agent.bin : "missing"} (${payload.agent?.detail ?? ""})`,
     `- auth: ${payload.auth?.loggedIn ? "ok" : "needs login"}`,
     `- sandbox: ${payload.sandboxSupported ? "supported" : "unsupported"}`,
-    `- model: ${payload.model?.model ?? "(unset → Cursor CLI default/auto)"} [source=${payload.model?.source}]`,
+    `- model: ${payload.model?.model ?? "auto"} [source=${payload.model?.source}]`,
     `- timeoutMs: ${payload.timeout?.timeoutMs ?? ""} [source=${payload.timeout?.source ?? ""}]`,
     `- companionScript: ${payload.companionScript ?? ""}`,
     `- config: ${payload.configPath ?? ""}`,

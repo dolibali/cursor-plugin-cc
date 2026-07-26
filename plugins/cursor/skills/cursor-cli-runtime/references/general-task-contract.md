@@ -44,7 +44,7 @@ expected session.
 - Write-capable (`--force` under the hood) unless `--read-only`
 - Sandboxed by default; use repeated `--add-dir` for cross-repository work
 - Unrestricted host access only when the caller explicitly passes `--sandbox disabled`
-- Model unset unless user/config/env specifies one
+- Model `auto` unless user/config/env specifies another value
 - No git commit/push/reset by the Worker unless the user explicitly requested that in the prompt (still prefer not to)
 
 ## Background

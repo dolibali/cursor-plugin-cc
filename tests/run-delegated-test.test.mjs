@@ -458,7 +458,7 @@ test("records unrestricted boundary metadata when sandbox is disabled", async ()
   assert.equal(output.result.filesystemBoundaryVerified, false)
 })
 
-test("defaults to three hours and thirty-minute progress boundaries", async () => {
+test("defaults to one hour and thirty-minute progress boundaries", async () => {
   const current = await fixture()
   await execFileAsync(
     process.execPath,
@@ -485,7 +485,7 @@ test("defaults to three hours and thirty-minute progress boundaries", async () =
     },
   )
   const delegation = JSON.parse(await readFile(path.join(current.artifactDir, "delegation.json"), "utf8"))
-  assert.equal(delegation.timeoutMs, 3 * 60 * 60 * 1_000)
+  assert.equal(delegation.timeoutMs, 60 * 60 * 1_000)
   assert.equal(delegation.noProgressTimeoutMs, 30 * 60 * 1_000)
   assert.equal(delegation.longCommandTimeoutMs, 30 * 60 * 1_000)
   assert.equal(delegation.processGuardMs, 10 * 1_000)

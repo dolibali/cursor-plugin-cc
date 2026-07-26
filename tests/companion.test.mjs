@@ -136,14 +136,18 @@ function writeResumeSourceJob(workspace, overrides = {}) {
   return job
 }
 
-test("setup --json reports model unset and fake agent", () => {
+test("setup --json reports compact agent status and one-hour defaults", () => {
   const result = run(["setup", "--json"])
   assert.equal(result.status, 0, result.stderr)
   const payload = JSON.parse(result.stdout)
   assert.equal(payload.agent.available, true)
-  assert.equal(payload.model.source, "unset")
+  assert.equal(payload.agent.detail, "ok")
+  assert.equal(payload.auth.detail, "ok")
+  assert.doesNotMatch(result.stdout, /Usage: fake-agent/)
+  assert.doesNotMatch(result.stdout, /fake-user/)
+  assert.deepEqual(payload.model, { model: "auto", source: "default" })
   assert.deepEqual(payload.timeout, {
-    timeoutMs: 3 * 60 * 60 * 1_000,
+    timeoutMs: 60 * 60 * 1_000,
     source: "default",
   })
 })
@@ -215,11 +219,22 @@ test("task rejects home workspace", () => {
 
 test("task foreground with fake agent", () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
+  const argsLog = path.join(os.tmpdir(), `cursor-companion-default-model-${process.pid}-${Date.now()}.json`)
   fs.writeFileSync(path.join(workspace, "README.md"), "x\n")
-  const result = run(["task", "--workspace", workspace, "--json", "--", "fix the readme note"])
+  const result = run(
+    ["task", "--workspace", workspace, "--json", "--", "fix the readme note"],
+    { FAKE_AGENT_ARGV_LOG: argsLog },
+  )
   assert.equal(result.status, 0, result.stderr + result.stdout)
   const job = JSON.parse(result.stdout)
   assert.equal(job.status, "completed")
+  assert.equal(job.model, "auto")
+  assert.equal(job.modelSource, "default")
+  const agentArgs = JSON.parse(fs.readFileSync(argsLog, "utf8"))
+  assert.deepEqual(agentArgs.slice(agentArgs.indexOf("--model"), agentArgs.indexOf("--model") + 2), [
+    "--model",
+    "auto",
+  ])
   assert.match(job.stdoutPreview || "", /FAKE_AGENT_OK/)
   assert.equal(job.cursorSession.id, "fake-simple-session")
 })
@@ -502,7 +517,7 @@ test("background jobs write a terminal result that status and result can read", 
   const job = waitForJob(workspace, jobId, ["completed"])
   assert.equal(job.status, "completed")
   assert.equal(job.pid, null)
-  assert.equal(job.timeoutMs, 3 * 60 * 60 * 1_000)
+  assert.equal(job.timeoutMs, 60 * 60 * 1_000)
   assert.equal(job.timeoutSource, "default")
   assert.equal("request" in job, false)
   const result = run(["result", jobId, "--workspace", workspace, "--json"])

@@ -40,7 +40,7 @@ export function getAgentAvailability(env = process.env) {
     available,
     bin,
     detail: available
-      ? (check.stdout.trim() || check.stderr.trim() || "ok")
+      ? "ok"
       : (check.stderr || check.error?.message || `exit ${check.status}`),
   }
 }
@@ -59,9 +59,10 @@ export function getAgentAuthStatus(bin, env = process.env) {
   if (result.error) return { loggedIn: false, detail: result.error.message }
   const loggedIn = /logged in|authenticated|Logged in/i.test(text) && !/not logged|unauthenticated|login required/i.test(text)
   const maybeOk = result.status === 0 && !/login required|please log in|not logged/i.test(text)
+  const authenticated = loggedIn || maybeOk
   return {
-    loggedIn: loggedIn || maybeOk,
-    detail: text.trim().slice(0, 500) || `exit ${result.status}`,
+    loggedIn: authenticated,
+    detail: authenticated ? "ok" : (text.trim().slice(0, 500) || `exit ${result.status}`),
     status: result.status,
   }
 }

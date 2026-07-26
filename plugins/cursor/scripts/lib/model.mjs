@@ -1,6 +1,6 @@
 import { loadGlobalConfig } from "./state.mjs"
 
-/** Priority: CLI --model > CURSOR_COMPANION_MODEL > config.json model > unset */
+/** Priority: CLI --model > CURSOR_COMPANION_MODEL > config.json model > auto */
 export function resolveModel(cliModel, env = process.env) {
   if (cliModel != null && String(cliModel).trim()) {
     return { model: String(cliModel).trim(), source: "cli" }
@@ -12,5 +12,5 @@ export function resolveModel(cliModel, env = process.env) {
   if (config.model != null && String(config.model).trim()) {
     return { model: String(config.model).trim(), source: "config" }
   }
-  return { model: null, source: "unset" }
+  return { model: "auto", source: "default" }
 }

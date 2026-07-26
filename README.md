@@ -58,22 +58,25 @@ node "$COMPANION" task --workspace /abs/repo --background -- "Run the long migra
 
 ### Global task timeout
 
-The default total task timeout is three hours. Configure one user-level default
+The default total task timeout is one hour. Configure one user-level default
 for simple, E2E, foreground, background, and resumed jobs:
 
 ```bash
 # Four hours, in milliseconds
 node "$COMPANION" setup --set-timeout-ms 14400000 --json
 
-# Remove the override and restore the three-hour default
+# Remove the override and restore the one-hour default
 node "$COMPANION" setup --set-timeout-ms - --json
 ```
 
 The precedence is `--timeout-ms`, `CURSOR_COMPANION_TIMEOUT_MS`,
-`config.json.timeoutMs`, then the three-hour default. Values must be positive
+`config.json.timeoutMs`, then the one-hour default. Values must be positive
 JavaScript safe integers. There is no smaller product cap; long values are
 scheduled in bounded timer segments so they do not overflow Node's timer
 limit. `setup --json` reports the effective `timeoutMs` and its source.
+
+Fresh installations write `model: "auto"` and `timeoutMs: 3600000` to the
+companion config. Existing non-empty model and timeout values are preserved.
 
 ### Multiple workspaces
 

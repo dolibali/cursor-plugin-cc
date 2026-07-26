@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks"
 
 import { loadGlobalConfig } from "./state.mjs"
 
-export const DEFAULT_TIMEOUT_MS = 3 * 60 * 60 * 1000
+export const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 export function parseTimeoutMs(value, optionName = "timeoutMs") {

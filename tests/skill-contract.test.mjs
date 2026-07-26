@@ -50,7 +50,7 @@ test("plugin version metadata stays synchronized", async () => {
   const marketplace = JSON.parse(
     await readFile(path.join(root, ".claude-plugin", "marketplace.json"), "utf8"),
   )
-  assert.equal(packageManifest.version, "0.3.4")
+  assert.equal(packageManifest.version, "0.3.5")
   assert.equal(pluginManifest.version, packageManifest.version)
   assert.equal(marketplace.metadata.version, packageManifest.version)
   assert.equal(marketplace.plugins[0].version, packageManifest.version)

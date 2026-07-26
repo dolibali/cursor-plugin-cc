@@ -88,7 +88,7 @@ install_link() {
 write_config() {
   local config="${HOME}/.cursor/cursor-companion/config.json"
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "would set companionScript in $config to $COMPANION"
+    echo "would set companionScript and missing defaults in $config"
     return
   fi
   mkdir -p "$(dirname "$config")"
@@ -107,6 +107,8 @@ if (fs.existsSync(file)) {
   }
 }
 config.companionScript = companionScript
+if (config.model == null || String(config.model).trim() === "") config.model = "auto"
+if (config.timeoutMs == null) config.timeoutMs = 60 * 60 * 1000
 const temporary = `${file}.${process.pid}.tmp`
 fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`)
 fs.renameSync(temporary, file)
