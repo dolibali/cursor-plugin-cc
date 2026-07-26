@@ -196,6 +196,14 @@ test("allows verified source repairs", async () => {
   assert.match(await readFile(output.result.attemptedRepairPatch, "utf8"), /autonomous repair/)
 })
 
+test("allows verified repairs when Git refreshes only index stat metadata", async () => {
+  const output = await runFixture("autonomous-repair-index-refresh")
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.overall, "PASS")
+  assert.deepEqual(output.result.workspaceGuard.violations, [])
+  assert.match(await readFile(output.result.attemptedRepairPatch, "utf8"), /index refresh/)
+})
+
 test("repair patches exclude pre-existing dirty worktree content", async () => {
   const output = await runFixture("autonomous-repair", {
     preexistingProductionChange: true,
@@ -427,6 +435,14 @@ test("detects repository metadata changes that bypass the PATH guard", async () 
   assert.ok(output.result.reasons.includes("PROHIBITED_GIT_STATE_CHANGE"))
   assert.ok(output.result.workspaceGuard.violations.includes("HEAD_CHANGED"))
   assert.equal(output.result.escalation.code, "PROHIBITED_GIT_STATE_CHANGE")
+})
+
+test("detects staged content changes that bypass the PATH guard", async () => {
+  const output = await runFixture("absolute-git-stage")
+  assert.equal(output.exitCode, 2)
+  assert.equal(output.result.overall, "FAIL")
+  assert.ok(output.result.reasons.includes("PROHIBITED_GIT_STATE_CHANGE"))
+  assert.ok(output.result.workspaceGuard.violations.includes("INDEX_CHANGED"))
 })
 
 test("tracks repairs in an additional workspace", async () => {

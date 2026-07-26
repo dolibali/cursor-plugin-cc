@@ -553,14 +553,11 @@ async function workspaceFingerprint(workspace) {
 
 async function repositoryGuardState(workspace) {
   const head = (await git(workspace, ["rev-parse", "HEAD"])).stdout.trim()
-  const indexPathOutput = (await git(workspace, ["rev-parse", "--git-path", "index"])).stdout.trim()
-  const indexPath = path.isAbsolute(indexPathOutput)
-    ? indexPathOutput
-    : path.resolve(workspace, indexPathOutput)
+  const stagedEntries = (await git(workspace, ["ls-files", "--stage", "-v", "-z"])).stdout
   const stashResult = await git(workspace, ["rev-parse", "--verify", "refs/stash"], [0, 1, 128])
   return {
     head,
-    indexHash: await hashPath(indexPath),
+    indexHash: createHash("sha256").update(stagedEntries).digest("hex"),
     stash: stashResult.code === 0 ? stashResult.stdout.trim() : null,
   }
 }

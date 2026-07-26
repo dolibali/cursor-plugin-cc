@@ -130,7 +130,7 @@ The Runner:
 
 Electron, Extension Host, Playwright, shell commands, and ordinary processes whose names merely contain `agent` are not nested Cursor Workers.
 
-The same artifact-local PATH layer forwards read-only Git commands but blocks destructive subcommands. The Runner also compares `HEAD`, the index, and `refs/stash` before and after the Worker so an absolute-path Git invocation cannot silently change repository metadata. A blocked destructive command escalates; a metadata change fails integrity validation and is preserved for parent inspection.
+The same artifact-local PATH layer forwards read-only Git commands but blocks destructive subcommands. The Runner also compares `HEAD`, semantic staged index entries, and `refs/stash` before and after the Worker so an absolute-path Git invocation cannot silently change repository metadata. Index stat-cache refreshes do not count as staged changes. A blocked destructive command escalates; a metadata change fails integrity validation and is preserved for parent inspection.
 
 ## Failure class: product vs environment
 

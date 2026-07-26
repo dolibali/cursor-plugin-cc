@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process"
-import { appendFile, readFile, writeFile } from "node:fs/promises"
+import { appendFile, readFile, utimes, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 const args = process.argv.slice(2)
@@ -183,6 +183,18 @@ if (mode === "autonomous-repair") {
   await appendFile(path.join(workspace, "src/product.ts"), "\n// autonomous repair\n")
   await progress({ type: "meaningful-progress", kind: "repair", summary: "repaired product behavior" })
 }
+if (mode === "autonomous-repair-index-refresh") {
+  const unchangedFile = path.join(workspace, "tests/sample.test.ts")
+  const future = new Date(Date.now() + 5_000)
+  await utimes(unchangedFile, future, future)
+  await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspace, "update-index", "--refresh"])
+  await appendFile(path.join(workspace, "src/product.ts"), "\n// autonomous repair after index refresh\n")
+  await progress({ type: "meaningful-progress", kind: "repair", summary: "repaired after index stat refresh" })
+}
+if (mode === "absolute-git-stage") {
+  await appendFile(path.join(workspace, "src/product.ts"), "\n// staged by delegated worker\n")
+  await childExit(process.env.FAKE_REAL_GIT_BIN, ["-C", workspace, "add", "src/product.ts"])
+}
 if (mode === "additional-workspace-repair") {
   await appendFile(path.join(workspaces[1], "src/product.ts"), "\n// additional workspace repair\n")
   await progress({ type: "meaningful-progress", kind: "repair", summary: "repaired additional workspace" })
@@ -227,7 +239,9 @@ const result = {
 }
 const repairCount = mode === "many-autonomous-repairs"
   ? 4
-  : mode === "autonomous-repair" || mode === "additional-workspace-repair"
+  : mode === "autonomous-repair"
+      || mode === "autonomous-repair-index-refresh"
+      || mode === "additional-workspace-repair"
     ? 1
     : 0
 result.repair = {
