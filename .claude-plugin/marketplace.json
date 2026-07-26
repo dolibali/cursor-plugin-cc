@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Cursor Agent CLI plugins for Claude Code delegation.",
-    "version": "0.3.3"
+    "version": "0.3.4"
   },
   "plugins": [
     {
       "name": "cursor",
       "description": "Use local Cursor Agent CLI from Claude Code to delegate tasks.",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "author": {
         "name": "dolibali"
       },

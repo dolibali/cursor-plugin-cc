@@ -51,13 +51,18 @@ import {
   writeJsonAtomic,
 } from "./lib/state.mjs"
 import { isSystemTemporaryPath } from "./lib/system-temp.mjs"
+import {
+  addTimeoutGrace,
+  parseTimeoutMs,
+  resolveTimeout,
+  scheduleLongTimeout,
+} from "./lib/timeout.mjs"
 import { runTrackedJob } from "./lib/tracked-jobs.mjs"
 import { assertAbsoluteWorkspace, resolveWorkspaceRoots } from "./lib/workspace.mjs"
 
 const PLUGIN_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const COMPANION_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "cursor-companion.mjs")
 const RUNNER_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "run-delegated-test.mjs")
-const DEFAULT_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const MAX_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000
 const MAX_LONG_COMMAND_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATE_GRACE_MS = 1_000
@@ -67,6 +72,7 @@ const ARTIFACT_CLAIM_FILE = ".cursor-companion-job.json"
 function printUsage() {
   console.log(`Usage:
   node scripts/cursor-companion.mjs setup [--json] [--set-model <slug|->]
+    [--set-timeout-ms <positive-ms|->]
   node scripts/cursor-companion.mjs task [--workspace <abs>] [--add-dir <abs>]...
     [--background] [--read-only] [--sandbox enabled|disabled] [--model <slug>]
     [--mode simple|e2e] [--timeout-ms <ms>] [--prompt-file <path>]
@@ -242,7 +248,7 @@ function appendLog(logFile, chunk) {
 }
 
 async function runProcess(command, args, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const timeoutMs = options.timeoutMs ?? resolveTimeout(null).timeoutMs
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -270,7 +276,7 @@ async function runProcess(command, args, options = {}) {
     const finish = (value) => {
       if (settled) return
       settled = true
-      clearTimeout(timeoutTimer)
+      cancelTimeout()
       clearTimeout(forceTimer)
       clearTimeout(fallbackTimer)
       clearTimeout(signalForceTimer)
@@ -278,7 +284,7 @@ async function runProcess(command, args, options = {}) {
       process.off("SIGTERM", forwardSignal)
       resolve(value)
     }
-    const timeoutTimer = setTimeout(() => {
+    const cancelTimeout = scheduleLongTimeout(() => {
       if (settled) return
       timedOut = true
       terminateProcessTree(child.pid)
@@ -336,13 +342,19 @@ async function runProcess(command, args, options = {}) {
 function commandSetup(argv) {
   const { options, positionals } = parseArgs(normalizeArgv(argv), {
     booleanOptions: ["json"],
-    valueOptions: ["set-model"],
+    valueOptions: ["set-model", "set-timeout-ms"],
   })
   if (positionals.length) throw new Error(`Unexpected setup arguments: ${positionals.join(" ")}`)
-  if (options["set-model"] != null) {
+  if (options["set-model"] != null || options["set-timeout-ms"] != null) {
     const config = loadGlobalConfig()
-    if (options["set-model"] === "-" || options["set-model"] === "") delete config.model
-    else config.model = String(options["set-model"]).trim()
+    if (options["set-model"] != null) {
+      if (options["set-model"] === "-" || options["set-model"] === "") delete config.model
+      else config.model = String(options["set-model"]).trim()
+    }
+    if (options["set-timeout-ms"] != null) {
+      if (options["set-timeout-ms"] === "-") delete config.timeoutMs
+      else config.timeoutMs = parseTimeoutMs(options["set-timeout-ms"], "--set-timeout-ms")
+    }
     config.companionScript = COMPANION_SCRIPT
     saveGlobalConfig(config)
   }
@@ -357,6 +369,7 @@ function commandSetup(argv) {
     auth,
     sandboxSupported,
     model: resolveModel(null),
+    timeout: resolveTimeout(null),
     companionScript: config.companionScript || COMPANION_SCRIPT,
     configPath: resolveGlobalConfigPath(),
     stateHome: companionHomeDir(),
@@ -390,12 +403,8 @@ function parseTaskRequest(argv) {
   const workspaceRoots = resolveWorkspaceRoots(options.workspace || process.cwd(), options["add-dir"] ?? [])
   const mode = validateMode(options.mode)
   const sandbox = validateSandbox(options.sandbox)
-  const timeoutMs = parseBoundedNumber(
-    options["timeout-ms"],
-    "--timeout-ms",
-    DEFAULT_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS,
-  )
+  const timeout = resolveTimeout(options["timeout-ms"])
+  const timeoutMs = timeout.timeoutMs
   const noProgressTimeoutMs = parseBoundedNumber(
     options["no-progress-timeout-ms"],
     "--no-progress-timeout-ms",
@@ -448,6 +457,7 @@ function parseTaskRequest(argv) {
     background: Boolean(options.background),
     readOnly: Boolean(options["read-only"]),
     timeoutMs,
+    timeoutSource: timeout.source,
     noProgressTimeoutMs,
     longCommandTimeoutMs,
     prompt,
@@ -592,7 +602,7 @@ async function executeE2E(request, logFile) {
 
   const result = await runProcess(process.execPath, args, {
     cwd: request.workspace,
-    timeoutMs: request.timeoutMs + TERMINATE_GRACE_MS * 2,
+    timeoutMs: addTimeoutGrace(request.timeoutMs, TERMINATE_GRACE_MS * 2),
     logFile,
   })
   const resultFile = path.join(request.artifactDir, "run-result.json")
@@ -752,6 +762,8 @@ async function commandTask(argv) {
     sandbox: request.sandbox,
     hostAccess: request.hostAccess,
     readOnly: request.readOnly,
+    timeoutMs: request.timeoutMs,
+    timeoutSource: request.timeoutSource,
     background: request.background,
     logFile,
     resultFile: request.artifactDir ? path.join(request.artifactDir, "run-result.json") : null,

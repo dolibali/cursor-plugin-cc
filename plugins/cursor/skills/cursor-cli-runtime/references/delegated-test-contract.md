@@ -43,7 +43,7 @@ new Cursor conversation when resume fails.
 Defaults:
 
 - model: unset by default (Cursor CLI `auto`); override with `--model` / env / config;
-- total timeout: 3 hours;
+- total timeout: effective global value from `setup --json` (default 3 hours);
 - no-meaningful-progress timeout: 30 minutes;
 - declared long-command maximum: 30 minutes;
 - artifact heartbeat: 30 seconds;
@@ -56,16 +56,24 @@ outside every declared Git workspace.
 
 Immediately before the blocking call, the parent sends a visible conversation
 update stating that Cursor is starting autonomous GUI validation and may run up
-to the configured ceiling. The update must precede the tool call; Runner stdout
-does not replace it.
+to the effective ceiling reported by `setup --json`. The update must precede
+the tool call; Runner stdout does not replace it.
 
-The parent then starts the Runner with one blocking shell call (for example Codex `shell_command`) and waits until the process exits. Set the tool `timeout_ms` to at least the Runner total timeout ceiling (default **10800000** ms = 3 hours). Do not use short-yield `exec_command` plus empty `write_stdin` polling to continue waiting.
+The parent then starts the Runner with one blocking shell call (for example
+Codex `shell_command`) and waits until the process exits. When supported, set
+the tool execution timeout to the effective `timeoutMs` plus process-cleanup
+grace. A persistent terminal session stays open and leaves timeout enforcement
+to companion. If the host hard limit is shorter, start the task with
+`--background` and return its job ID rather than killing Cursor early. Do not
+use short-yield `exec_command` plus empty `write_stdin` polling to continue
+waiting. Do not modify Codex configuration or
+`background_terminal_max_timeout`.
 
 Stop semantics:
 
-- The parent does **not** always wait the full 3 hours. That value is only the ceiling.
+- The parent does **not** always wait until the configured ceiling.
 - When the Runner/Cursor finishes early (`PASS`, `FAIL`, `BLOCKED`, no meaningful progress, long-command timeout, recursion escalation, and similar), the child exits and the parent resumes immediately.
-- Only a run that hits the ceiling is cut at about 3 hours by the Runner or the parent tool timeout.
+- Only a run that hits the ceiling is cut by the Runner/companion deadline.
 - Artifact heartbeats do **not** wake the parent model. The parent continues only after the child process returns.
 
 While waiting, the parent must not read heartbeat files, progress JSONL, stream logs, or screenshot directories, and must not poll with short timeouts. After exit, read only `<artifact-dir>/run-result.json` by default; open additional contract summary fields only when diagnosing failure. A single tool await idle-wait does not consume parent LLM tokens; repeated poll turns do.
@@ -91,7 +99,10 @@ The Worker appends JSONL to `DELEGATED_TEST_PROGRESS_FILE`.
 
 Heartbeat, repeated logs, unchanged retries, unsupported timeout increases, weakened assertions, and plans without evidence do not refresh meaningful progress.
 
-The Runner escalates after 30 minutes without meaningful progress when no declared long command is active. A declared command cannot exceed 30 minutes. The entire run cannot exceed 3 hours.
+The Runner escalates after 30 minutes without meaningful progress when no
+declared long command is active. A declared command cannot exceed 30 minutes.
+The entire run uses the effective global task timeout unless the current task
+passes `--timeout-ms`.
 
 ## Recursion Guard
 
@@ -146,7 +157,7 @@ Escalate only when:
 - public protocol, persistence, migration, dependency, security, destructive data, or cross-repository changes are required;
 - no meaningful progress occurs for 30 minutes;
 - a required command exceeds 30 minutes and cannot recover;
-- the total run reaches 3 hours;
+- the total run reaches its effective task timeout;
 - repeated recursive delegation is attempted.
 
 Source changes are allowed only when every required check and the affected baseline checks pass. Otherwise report `ESCALATION_REQUIRED`; never claim a complete pass.

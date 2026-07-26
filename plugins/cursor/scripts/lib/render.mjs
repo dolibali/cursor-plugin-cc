@@ -6,6 +6,7 @@ export function renderSetupReport(payload) {
     `- auth: ${payload.auth?.loggedIn ? "ok" : "needs login"}`,
     `- sandbox: ${payload.sandboxSupported ? "supported" : "unsupported"}`,
     `- model: ${payload.model?.model ?? "(unset → Cursor CLI default/auto)"} [source=${payload.model?.source}]`,
+    `- timeoutMs: ${payload.timeout?.timeoutMs ?? ""} [source=${payload.timeout?.source ?? ""}]`,
     `- companionScript: ${payload.companionScript ?? ""}`,
     `- config: ${payload.configPath ?? ""}`,
   ]
@@ -34,6 +35,7 @@ export function renderTaskResult(job) {
     `- mode: ${job.mode ?? "simple"}`,
     `- sandbox: ${job.sandbox ?? "enabled"}`,
     `- hostAccess: ${job.hostAccess ?? "workspace"}`,
+    `- timeoutMs: ${job.timeoutMs ?? ""} [source=${job.timeoutSource ?? "unknown"}]`,
   ]
   if (job.resumedFromJobId) lines.push(`- resumedFrom: ${job.resumedFromJobId}`)
   if (job.exitCode != null) lines.push(`- exitCode: ${job.exitCode}`)

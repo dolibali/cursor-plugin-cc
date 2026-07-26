@@ -17,8 +17,9 @@ COMPANION=$(node -e 'const fs=require("fs"),os=require("os"),p=require("path");c
 ```
 
 If it is not installed, run `./scripts/install-skills.sh` from the plugin
-checkout. Run `node "$COMPANION" setup --json` when availability, login, or
-sandbox support is uncertain.
+checkout. Run `node "$COMPANION" setup --json` before a foreground delegation
+to read availability, login, sandbox support, and the effective
+`timeout.timeoutMs`.
 
 ## Delegation
 
@@ -55,14 +56,25 @@ specific model is requested.
 Immediately before every foreground `task` invocation that may block, send the
 user a visible progress update in the parent conversation. State that Cursor is
 starting, name the delegated task category, and give the configured maximum
-wait. For example: "Starting Cursor for isolated GUI validation; this call will
-wait for completion and may take up to 3 hours." Send this update before the
-shell/tool call; companion stdout is not a substitute. Do not add this
-announcement for short `status`, `result`, or `cancel` commands.
+wait from `setup --json`, formatted for readability. For example: "Starting
+Cursor for isolated GUI validation; this call will wait for completion and may
+take up to 4 hours." Send this update before the shell/tool call; companion
+stdout is not a substitute. Do not add this announcement for short `status`,
+`result`, or `cancel` commands.
 
-For a foreground task, make one blocking companion call with the parent tool
-timeout at or above the companion ceiling. Do not poll stdin or heartbeat
+For a foreground task, make one blocking companion call. When the shell tool
+accepts an execution timeout, set it to the effective `timeoutMs` plus a short
+process-cleanup grace; never set it lower than the companion deadline. When
+waiting through a persistent terminal session, keep that session open and let
+the companion be the only timeout authority. Do not poll stdin or heartbeat
 artifacts.
+
+If the host shell has a hard maximum below the effective timeout, start the
+task with `--background`, return the job ID, and use explicit `status`,
+`result`, or `cancel` commands later. Never shorten the Cursor task to fit the
+host limit. Do not edit `~/.codex/config.toml` or
+`background_terminal_max_timeout`; that setting controls a terminal wait
+window, not the companion task deadline.
 
 ```bash
 node "$COMPANION" task --workspace <root> --background -- "<prompt>"

@@ -14,16 +14,30 @@ const FAKE_AGENT = path.join(ROOT, "tests", "fake-agent.mjs")
 const FAKE_DELEGATED_AGENT = path.join(ROOT, "tests", "fake-agent-delegated.mjs")
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-home-"))
 
-function run(args, env = {}) {
+function testEnvironment(home, env = {}) {
+  const { CURSOR_COMPANION_TIMEOUT_MS: _ignoredTimeout, ...baseEnvironment } = process.env
+  return {
+    ...baseEnvironment,
+    HOME: home,
+    ...env,
+    CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT,
+  }
+}
+
+function runWithHome(args, home, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {
     encoding: "utf8",
-    env: { ...process.env, HOME: TEST_HOME, ...env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
+    env: testEnvironment(home, env),
   })
+}
+
+function run(args, env = {}) {
+  return runWithHome(args, TEST_HOME, env)
 }
 
 function runAsync(args, env = {}) {
   const child = spawn(process.execPath, [COMPANION, ...args], {
-    env: { ...process.env, HOME: TEST_HOME, ...env, CURSOR_COMPANION_AGENT_BIN: FAKE_AGENT },
+    env: testEnvironment(TEST_HOME, env),
     stdio: ["ignore", "pipe", "pipe"],
   })
   let stdout = ""
@@ -128,6 +142,69 @@ test("setup --json reports model unset and fake agent", () => {
   const payload = JSON.parse(result.stdout)
   assert.equal(payload.agent.available, true)
   assert.equal(payload.model.source, "unset")
+  assert.deepEqual(payload.timeout, {
+    timeoutMs: 3 * 60 * 60 * 1_000,
+    source: "default",
+  })
+})
+
+test("global timeout setup preserves config and task precedence is cli, env, config", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-timeout-home-"))
+  const configFile = path.join(home, ".cursor", "cursor-companion", "config.json")
+  fs.mkdirSync(path.dirname(configFile), { recursive: true })
+  fs.writeFileSync(configFile, `${JSON.stringify({ custom: "preserved" }, null, 2)}\n`)
+
+  const configured = runWithHome(["setup", "--set-timeout-ms", "14400000", "--json"], home)
+  assert.equal(configured.status, 0, configured.stderr)
+  assert.deepEqual(JSON.parse(configured.stdout).timeout, {
+    timeoutMs: 14_400_000,
+    source: "config",
+  })
+  assert.equal(JSON.parse(fs.readFileSync(configFile, "utf8")).custom, "preserved")
+
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-timeout-ws-"))
+  const fromConfig = runWithHome(["task", "--workspace", workspace, "--json", "--", "config"], home)
+  assert.equal(fromConfig.status, 0, fromConfig.stderr)
+  assert.equal(JSON.parse(fromConfig.stdout).timeoutMs, 14_400_000)
+  assert.equal(JSON.parse(fromConfig.stdout).timeoutSource, "config")
+
+  const fromEnvironment = runWithHome(
+    ["task", "--workspace", workspace, "--json", "--", "environment"],
+    home,
+    { CURSOR_COMPANION_TIMEOUT_MS: "12000" },
+  )
+  assert.equal(fromEnvironment.status, 0, fromEnvironment.stderr)
+  assert.equal(JSON.parse(fromEnvironment.stdout).timeoutMs, 12_000)
+  assert.equal(JSON.parse(fromEnvironment.stdout).timeoutSource, "env")
+
+  const fromCli = runWithHome(
+    ["task", "--workspace", workspace, "--timeout-ms", "9000", "--json", "--", "cli"],
+    home,
+    { CURSOR_COMPANION_TIMEOUT_MS: "12000" },
+  )
+  assert.equal(fromCli.status, 0, fromCli.stderr)
+  assert.equal(JSON.parse(fromCli.stdout).timeoutMs, 9_000)
+  assert.equal(JSON.parse(fromCli.stdout).timeoutSource, "cli")
+
+  const reset = runWithHome(["setup", "--set-timeout-ms", "-", "--json"], home)
+  assert.equal(reset.status, 0, reset.stderr)
+  assert.equal(JSON.parse(reset.stdout).timeout.source, "default")
+  const resetConfig = JSON.parse(fs.readFileSync(configFile, "utf8"))
+  assert.equal("timeoutMs" in resetConfig, false)
+  assert.equal(resetConfig.custom, "preserved")
+})
+
+test("invalid global timeout does not mutate config", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-invalid-timeout-home-"))
+  const configFile = path.join(home, ".cursor", "cursor-companion", "config.json")
+  fs.mkdirSync(path.dirname(configFile), { recursive: true })
+  const original = `${JSON.stringify({ custom: true }, null, 2)}\n`
+  fs.writeFileSync(configFile, original)
+
+  const result = runWithHome(["setup", "--set-timeout-ms", "0", "--json"], home)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /positive safe integer/)
+  assert.equal(fs.readFileSync(configFile, "utf8"), original)
 })
 
 test("task rejects home workspace", () => {
@@ -145,6 +222,20 @@ test("task foreground with fake agent", () => {
   assert.equal(job.status, "completed")
   assert.match(job.stdoutPreview || "", /FAKE_AGENT_OK/)
   assert.equal(job.cursorSession.id, "fake-simple-session")
+})
+
+test("simple task reaches the configured companion deadline", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-timeout-ws-"))
+  const result = run(
+    ["task", "--workspace", workspace, "--timeout-ms", "150", "--json", "--", "time out"],
+    { FAKE_AGENT_MODE: "medium" },
+  )
+  assert.notEqual(result.status, 0)
+  const job = JSON.parse(result.stdout)
+  assert.equal(job.status, "timeout")
+  assert.equal(job.timedOut, true)
+  assert.equal(job.timeoutMs, 150)
+  assert.equal(job.timeoutSource, "cli")
 })
 
 test("resumes a simple task in the same Cursor session with a new companion job", () => {
@@ -169,6 +260,8 @@ test("resumes a simple task in the same Cursor session with a new companion job"
     workspace,
     "--resume-job",
     firstJob.id.slice(0, 12),
+    "--timeout-ms",
+    "7000",
     "--json",
     "--",
     "continue with the follow-up",
@@ -180,6 +273,8 @@ test("resumes a simple task in the same Cursor session with a new companion job"
   assert.equal(secondJob.resumedFromJobId, firstJob.id)
   assert.equal(secondJob.model, "cursor-test-model")
   assert.equal(secondJob.modelSource, "resume")
+  assert.equal(secondJob.timeoutMs, 7_000)
+  assert.equal(secondJob.timeoutSource, "cli")
   assert.deepEqual(secondJob.cursorSession, {
     id: "simple-resume-session",
     resumed: true,
@@ -313,11 +408,11 @@ test("sandbox mode fails closed when Cursor CLI lacks support", () => {
   assert.deepEqual(JSON.parse(status.stdout).jobs, [])
 })
 
-test("rejects ignored E2E-only options and timeout overflow before creating a job", () => {
+test("rejects ignored E2E-only options and invalid timeout before creating a job", () => {
   for (const extraArgs of [
     ["--required-check", "fake-check"],
     ["--no-progress-timeout-ms", "1000"],
-    ["--timeout-ms", String(3 * 60 * 60 * 1000 + 1)],
+    ["--timeout-ms", String(Number.MAX_SAFE_INTEGER + 1)],
   ]) {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-companion-ws-"))
     const result = run([
@@ -407,6 +502,8 @@ test("background jobs write a terminal result that status and result can read", 
   const job = waitForJob(workspace, jobId, ["completed"])
   assert.equal(job.status, "completed")
   assert.equal(job.pid, null)
+  assert.equal(job.timeoutMs, 3 * 60 * 60 * 1_000)
+  assert.equal(job.timeoutSource, "default")
   assert.equal("request" in job, false)
   const result = run(["result", jobId, "--workspace", workspace, "--json"])
   assert.equal(result.status, 0, result.stderr)
@@ -666,6 +763,8 @@ test("e2e mode forwards roots, checks, sandbox, and timeout boundaries to the ru
   assert.equal(result.status, 0, result.stderr + result.stdout)
   const job = JSON.parse(result.stdout)
   assert.equal(job.status, "completed")
+  assert.equal(job.timeoutMs, 5_000)
+  assert.equal(job.timeoutSource, "cli")
   const delegation = JSON.parse(fs.readFileSync(path.join(artifactDir, "delegation.json"), "utf8"))
   assert.deepEqual(delegation.workspaceRoots, [
     fs.realpathSync(workspace),
@@ -726,6 +825,8 @@ test("resumes an explicit E2E job into a new job and artifact directory", () => 
     "e2e",
     "--resume-job",
     firstJob.id.slice(0, 12),
+    "--timeout-ms",
+    "7000",
     "--prompt-file",
     secondPrompt,
     "--artifact-dir",
@@ -748,6 +849,8 @@ test("resumes an explicit E2E job into a new job and artifact directory", () => 
   assert.equal(secondJob.artifactDir, secondArtifact)
   assert.equal(secondJob.model, "cursor-test-model")
   assert.equal(secondJob.modelSource, "resume")
+  assert.equal(secondJob.timeoutMs, 7_000)
+  assert.equal(secondJob.timeoutSource, "cli")
   assert.equal(fs.readFileSync(path.join(firstArtifact, "run-result.json"), "utf8"), firstResultBefore)
   const status = run(["status", secondJob.id, "--workspace", workspace, "--json"])
   assert.equal(status.status, 0, status.stderr)

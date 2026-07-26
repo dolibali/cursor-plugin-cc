@@ -20,9 +20,13 @@ import path from "node:path"
 
 import { cursorSessionFromInit, validCursorSessionId } from "./lib/resume.mjs"
 import { isSystemTemporaryPath } from "./lib/system-temp.mjs"
+import {
+  DEFAULT_TIMEOUT_MS,
+  parseTimeoutMs,
+  scheduleLongTimeout,
+} from "./lib/timeout.mjs"
 
 const DEFAULT_MODEL = null // leave unset → Cursor CLI auto
-const DEFAULT_TIMEOUT_MS = 3 * 60 * 60 * 1000
 const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000
 const DEFAULT_LONG_COMMAND_TIMEOUT_MS = 30 * 60 * 1000
 const HEARTBEAT_MS = 30 * 1000
@@ -104,7 +108,7 @@ function parseArgs(argv) {
         result.model = value
         break
       case "--timeout-ms":
-        result.timeoutMs = parsePositiveInteger(value, flag)
+        result.timeoutMs = parseTimeoutMs(value, flag)
         break
       case "--no-progress-timeout-ms":
         result.noProgressTimeoutMs = parsePositiveInteger(value, flag)
@@ -155,9 +159,6 @@ function parseArgs(argv) {
   result.timeoutMs ??= DEFAULT_TIMEOUT_MS
   result.noProgressTimeoutMs ??= DEFAULT_NO_PROGRESS_TIMEOUT_MS
   result.longCommandTimeoutMs ??= DEFAULT_LONG_COMMAND_TIMEOUT_MS
-  if (result.timeoutMs > DEFAULT_TIMEOUT_MS) {
-    throw new Error("--timeout-ms cannot exceed 3 hours")
-  }
   if (result.noProgressTimeoutMs > DEFAULT_NO_PROGRESS_TIMEOUT_MS) {
     throw new Error("--no-progress-timeout-ms cannot exceed 30 minutes")
   }
@@ -1129,8 +1130,11 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       idleMs,
       meaningfulProgressIdleMs: now - autonomousState.lastMeaningfulProgressAt,
     }).catch(() => {})
-    if (elapsedMs >= config.timeoutMs) terminate("TOTAL_TIMEOUT").catch(() => {})
   }, heartbeatIntervalMs)
+  const cancelTotalTimeout = scheduleLongTimeout(
+    () => terminate("TOTAL_TIMEOUT").catch(() => {}),
+    config.timeoutMs,
+  )
 
   let guardRunning = false
   const configuredGuardInterval = Number.parseInt(process.env.DELEGATED_TEST_GUARD_INTERVAL_MS ?? "", 10)
@@ -1220,6 +1224,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
   })
   clearInterval(heartbeatMonitor)
   clearInterval(guardMonitor)
+  cancelTotalTimeout()
   clearTimeout(terminationTimer)
   process.off("SIGINT", handleSigint)
   process.off("SIGTERM", handleSigterm)

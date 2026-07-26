@@ -252,6 +252,16 @@ test("terminates a worker only after no meaningful progress", async () => {
   assert.ok(output.result.reasons.includes("NO_MEANINGFUL_PROGRESS"))
 })
 
+test("terminates a worker at the total task deadline", async () => {
+  const output = await runFixture("sleep", {
+    timeoutMs: 150,
+    noProgressTimeoutMs: 1_000,
+  })
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("TOTAL_TIMEOUT"))
+})
+
 test("meaningful progress keeps a worker alive", async () => {
   const output = await runFixture("meaningful-progress", {
     timeoutMs: 2_000,
@@ -481,9 +491,40 @@ test("defaults to three hours and thirty-minute progress boundaries", async () =
   assert.equal(delegation.processGuardMs, 10 * 1_000)
 })
 
-test("rejects timeout overrides above their safety ceilings", async () => {
+test("accepts total timeouts above three hours", async () => {
+  const current = await fixture()
+  await execFileAsync(
+    process.execPath,
+    [
+      runner,
+      "--workspace",
+      current.workspace,
+      "--prompt-file",
+      current.promptFile,
+      "--artifact-dir",
+      current.artifactDir,
+      "--agent-bin",
+      fakeAgent,
+      "--required-check",
+      "fake-check",
+      "--timeout-ms",
+      "14400000",
+    ],
+    {
+      env: {
+        ...process.env,
+        CURSOR_DELEGATION_DEPTH: "0",
+        DELEGATED_TEST_GUARD_INTERVAL_MS: "25",
+        FAKE_AGENT_MODE: "pass",
+      },
+    },
+  )
+  const delegation = JSON.parse(await readFile(path.join(current.artifactDir, "delegation.json"), "utf8"))
+  assert.equal(delegation.timeoutMs, 14_400_000)
+})
+
+test("rejects progress timeout overrides above their safety ceilings", async () => {
   const cases = [
-    ["--timeout-ms", String(3 * 60 * 60 * 1_000 + 1), /cannot exceed 3 hours/],
     ["--no-progress-timeout-ms", String(30 * 60 * 1_000 + 1), /cannot exceed 30 minutes/],
     ["--long-command-timeout-ms", String(30 * 60 * 1_000 + 1), /cannot exceed 30 minutes/],
   ]

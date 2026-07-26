@@ -6,18 +6,26 @@ Use for simple Cursor delegations (UI tweaks, mechanical edits, bounded fixes) v
 
 1. Resolve the absolute target code directory (`--workspace`).
 2. Write a narrow prompt: goal, done criteria, constraints, out-of-scope.
-3. Send a visible parent-conversation update immediately before the blocking
+3. Run `node "$COMPANION" setup --json` and read the effective
+   `timeout.timeoutMs`.
+4. Send a visible parent-conversation update immediately before the blocking
    tool call. Say that Cursor is starting, summarize the delegated task, and
-   state the configured maximum wait.
-4. Run **one** blocking shell:
+   state the configured maximum wait in a readable duration.
+5. Run **one** blocking shell:
 
 ```bash
 node "$COMPANION" task --workspace <abs> [--add-dir <abs>]... \
   [--sandbox enabled|disabled] -- "<prompt>"
 ```
 
-5. Set tool `timeout_ms` ≥ companion foreground ceiling (default 3h). Do not poll.
-6. Report companion/agent stdout to the user. Do not re-implement the task locally on failure unless the user asks.
+6. If the shell tool supports an execution timeout, set it to the effective
+   `timeoutMs` plus process-cleanup grace. Never use a shorter timeout. A
+   persistent terminal session remains open and lets companion enforce the
+   deadline. Do not poll.
+7. If the host has a shorter hard maximum, use `--background`, return the job
+   ID, and retrieve it explicitly later. Do not modify Codex configuration or
+   `background_terminal_max_timeout`.
+8. Report companion/agent stdout to the user. Do not re-implement the task locally on failure unless the user asks.
 
 For a follow-up on the same goal, pass the prior job explicitly and provide only
 the incremental context:

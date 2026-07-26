@@ -56,6 +56,25 @@ node "$COMPANION" task --workspace /abs/repo --read-only -- "Investigate the fai
 node "$COMPANION" task --workspace /abs/repo --background -- "Run the long migration"
 ```
 
+### Global task timeout
+
+The default total task timeout is three hours. Configure one user-level default
+for simple, E2E, foreground, background, and resumed jobs:
+
+```bash
+# Four hours, in milliseconds
+node "$COMPANION" setup --set-timeout-ms 14400000 --json
+
+# Remove the override and restore the three-hour default
+node "$COMPANION" setup --set-timeout-ms - --json
+```
+
+The precedence is `--timeout-ms`, `CURSOR_COMPANION_TIMEOUT_MS`,
+`config.json.timeoutMs`, then the three-hour default. Values must be positive
+JavaScript safe integers. There is no smaller product cap; long values are
+scheduled in bounded timer segments so they do not overflow Node's timer
+limit. `setup --json` reports the effective `timeoutMs` and its source.
+
 ### Multiple workspaces
 
 Declare every writable project explicitly:
@@ -158,6 +177,14 @@ context, and E2E artifact isolation:
 
 ```bash
 npm run test:live:resume
+```
+
+The live timeout smoke test temporarily sets the installed global timeout to
+four hours, verifies both config and one-task CLI override sources through real
+Cursor calls, then restores the exact prior user config:
+
+```bash
+npm run test:live:timeout
 ```
 
 ## License
