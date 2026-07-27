@@ -253,9 +253,8 @@ function shellQuote(value) {
 async function createRecursionGuard(artifactDir) {
   const guardDir = path.join(artifactDir, ".delegation-guard-bin")
   const attemptsPath = path.join(artifactDir, "recursion-attempts.log")
-  const detachedAttemptsPath = path.join(artifactDir, "detached-process-attempts.log")
   await mkdir(guardDir, { recursive: true })
-  await Promise.all([writeFile(attemptsPath, ""), writeFile(detachedAttemptsPath, "")])
+  await writeFile(attemptsPath, "")
   const script = `#!/bin/sh
 printf '%s\\n' "Nested Cursor delegation blocked: delegated workers must execute the task directly." >&2
 printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_RECURSION_ATTEMPT_LOG"
@@ -266,35 +265,7 @@ exit 126
     await writeFile(target, script)
     await chmod(target, 0o755)
   }
-  const detachedScript = `#!/bin/sh
-printf '%s\\n' "Detached process launch blocked: delegated workers must keep child processes attached." >&2
-printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_DETACHED_ATTEMPT_LOG"
-exit 126
-`
-  for (const name of ["nohup", "setsid", "systemd-run"]) {
-    const target = path.join(guardDir, name)
-    await writeFile(target, detachedScript)
-    await chmod(target, 0o755)
-  }
-  if (process.platform === "darwin") {
-    const realLaunchctl = await resolveExecutable("launchctl")
-    const launchctlScript = `#!/bin/sh
-for argument in "$@"; do
-  case "$argument" in
-    submit|bootstrap|load|kickstart)
-      printf '%s\\n' "Detached launchctl operation blocked: $argument" >&2
-      printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) $0 $*" >> "$CURSOR_DETACHED_ATTEMPT_LOG"
-      exit 126
-      ;;
-  esac
-done
-exec ${shellQuote(realLaunchctl)} "$@"
-`
-    const target = path.join(guardDir, "launchctl")
-    await writeFile(target, launchctlScript)
-    await chmod(target, 0o755)
-  }
-  return { guardDir, attemptsPath, detachedAttemptsPath }
+  return { guardDir, attemptsPath }
 }
 
 async function createGitGuard(artifactDir, guardDir, realGitBin) {
@@ -360,31 +331,6 @@ function shellToolCall(toolCall) {
 function isNoExitStatusFailure(shellCall) {
   const error = shellCall?.result?.spawnError?.error
   return typeof error === "string" && /returned no exit status/i.test(error)
-}
-
-function prohibitedDetachedCommand(shellCall) {
-  const args = shellCall?.args
-  if (!args || typeof args !== "object") return null
-  const simpleCommands = Array.isArray(args.simpleCommands)
-    ? args.simpleCommands.map((command) => String(command).toLowerCase())
-    : []
-  const command = typeof args.command === "string" ? args.command : ""
-  for (const binary of ["nohup", "setsid", "systemd-run"]) {
-    if (simpleCommands.includes(binary)) return binary
-  }
-  if (
-    simpleCommands.includes("launchctl")
-    && /\blaunchctl\b[\s\S]{0,200}\b(submit|bootstrap|load|kickstart)\b/i.test(command)
-  ) {
-    return "launchctl"
-  }
-  if (simpleCommands.includes("disown") || /(?:^|[;&|\n]\s*)disown(?:\s|$)/i.test(command)) {
-    return "disown"
-  }
-  if (simpleCommands.includes("start-process") || /\bStart-Process\b/i.test(command)) {
-    return "Start-Process"
-  }
-  return null
 }
 
 async function gitGuardAttemptCount(attemptsPath) {
@@ -960,7 +906,6 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     activeLongCommand: null,
     blockedAttempts: 0,
     blockedGitAttempts: 0,
-    blockedDetachedAttempts: 0,
     shellFailureCount: 0,
     killedNestedPids: new Set(),
   }
@@ -1040,18 +985,6 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
         }
       }
       if (event.subtype !== "started") return
-      const detachedCommand = prohibitedDetachedCommand(shellCall)
-      if (detachedCommand) {
-        autonomousState.blockedDetachedAttempts += 1
-        enqueueProgress({
-          type: "runner.detachedProcessBlocked",
-          source: "stream",
-          command: detachedCommand,
-          attempts: autonomousState.blockedDetachedAttempts,
-        }).catch(() => {})
-        terminate("PROHIBITED_DETACHED_PROCESS").catch(() => {})
-        return
-      }
       const nestedToolCall = toolCall && typeof toolCall === "object"
         ? Object.entries(toolCall).find(
             ([key, value]) =>
@@ -1184,20 +1117,6 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       }
       if (autonomousState.blockedAttempts > 1) await terminate("RECURSIVE_DELEGATION_REPEATED")
 
-      const detachedAttempts = await recursionAttemptCount(
-        config.recursionGuard.detachedAttemptsPath,
-      )
-      if (detachedAttempts > autonomousState.blockedDetachedAttempts) {
-        autonomousState.blockedDetachedAttempts = detachedAttempts
-        await enqueueProgress({
-          type: "runner.detachedProcessBlocked",
-          source: "path",
-          attempts: detachedAttempts,
-        })
-        await terminate("PROHIBITED_DETACHED_PROCESS")
-        return
-      }
-
       const blockedGitAttempts = await gitGuardAttemptCount(config.workspaceGuard.attemptsPath)
       if (blockedGitAttempts > autonomousState.blockedGitAttempts) {
         autonomousState.blockedGitAttempts = blockedGitAttempts
@@ -1236,10 +1155,6 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
     autonomousState.blockedAttempts,
     await recursionAttemptCount(config.recursionGuard.attemptsPath),
   )
-  autonomousState.blockedDetachedAttempts = Math.max(
-    autonomousState.blockedDetachedAttempts,
-    await recursionAttemptCount(config.recursionGuard.detachedAttemptsPath),
-  )
   autonomousState.blockedGitAttempts = Math.max(
     autonomousState.blockedGitAttempts,
     await gitGuardAttemptCount(config.workspaceGuard.attemptsPath),
@@ -1270,7 +1185,7 @@ async function runAgent({ config, workspace, artifactDir, prompt, environment })
       blockedAttempts: autonomousState.blockedAttempts,
     },
     executionGuard: {
-      blockedDetachedAttempts: autonomousState.blockedDetachedAttempts,
+      blockedDetachedAttempts: 0,
       consecutiveShellFailures: autonomousState.shellFailureCount,
     },
     workspaceGuard: {
@@ -1421,7 +1336,6 @@ async function main() {
       CURSOR_DELEGATION_DEPTH: "1",
       CURSOR_DELEGATION_RUN_ID: config.runId,
       CURSOR_RECURSION_ATTEMPT_LOG: config.recursionGuard.attemptsPath,
-      CURSOR_DETACHED_ATTEMPT_LOG: config.recursionGuard.detachedAttemptsPath,
       CURSOR_GIT_GUARD_ATTEMPT_LOG: config.workspaceGuard.attemptsPath,
       PATH: `${config.recursionGuard.guardDir}${path.delimiter}${process.env.PATH ?? ""}`,
     },

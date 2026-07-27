@@ -124,13 +124,10 @@ if (mode === "detached-process") {
       },
     },
   })}\n`)
-  await new Promise((resolve) => setTimeout(resolve, 30_000))
-  process.exit(0)
 }
 if (mode === "path-detached-process") {
-  await childExit("nohup", [process.execPath, "-e", "setTimeout(() => {}, 30000)"])
-  await new Promise((resolve) => setTimeout(resolve, 30_000))
-  process.exit(0)
+  const exitCode = await childExit("nohup", [process.execPath, "-e", ""])
+  if (exitCode !== 0) process.exit(exitCode ?? 1)
 }
 if (mode === "long-command-timeout") {
   await progress({ type: "long-command", state: "start", command: "fake long command", expectedMaxMs: 100 })

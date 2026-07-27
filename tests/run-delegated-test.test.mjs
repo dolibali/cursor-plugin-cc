@@ -359,24 +359,18 @@ test("a successful shell result resets the unavailable-shell sequence", async ()
   assert.equal(output.result.executionGuard.consecutiveShellFailures, 2)
 })
 
-test("blocks detached process commands observed in the Cursor stream", async () => {
-  const output = await runFixture("detached-process", {
-    timeoutMs: 2_000,
-  })
-  assert.equal(output.exitCode, 3)
-  assert.equal(output.result.overall, "BLOCKED")
-  assert.ok(output.result.reasons.includes("PROHIBITED_DETACHED_PROCESS"))
-  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 1)
+test("allows detached process commands observed in the Cursor stream", async () => {
+  const output = await runFixture("detached-process")
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.overall, "PASS")
+  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 0)
 })
 
-test("blocks detached process binaries through the delegated PATH", async () => {
-  const output = await runFixture("path-detached-process", {
-    timeoutMs: 2_000,
-  })
-  assert.equal(output.exitCode, 3)
-  assert.equal(output.result.overall, "BLOCKED")
-  assert.ok(output.result.reasons.includes("PROHIBITED_DETACHED_PROCESS"))
-  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 1)
+test("allows detached process binaries through the delegated PATH", async () => {
+  const output = await runFixture("path-detached-process")
+  assert.equal(output.exitCode, 0)
+  assert.equal(output.result.overall, "PASS")
+  assert.equal(output.result.executionGuard.blockedDetachedAttempts, 0)
 })
 
 test("blocks one PATH recursion attempt and lets the worker continue", async () => {

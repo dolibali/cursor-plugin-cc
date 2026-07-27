@@ -125,10 +125,10 @@ The Runner:
 - stops and escalates after repeated recursion attempts.
 - stops immediately when Cursor attempts an internal `taskToolCall`.
 - stops after three consecutive Shell Tool results report no exit status.
-- blocks detached launch mechanisms such as `nohup`, `setsid`, `systemd-run`,
-  `disown`, `Start-Process`, and launch-style `launchctl` subcommands.
 
-Electron, Extension Host, Playwright, shell commands, and ordinary processes whose names merely contain `agent` are not nested Cursor Workers.
+Electron, Extension Host, Playwright, shell commands (including detached launch
+mechanisms), and ordinary processes whose names merely contain `agent` are not
+nested Cursor Workers.
 
 The same artifact-local PATH layer forwards read-only Git commands but blocks destructive subcommands. The Runner also compares `HEAD`, semantic staged index entries, and `refs/stash` before and after the Worker so an absolute-path Git invocation cannot silently change repository metadata. Index stat-cache refreshes do not count as staged changes. A blocked destructive command escalates; a metadata change fails integrity validation and is preserved for parent inspection.
 
@@ -229,7 +229,8 @@ Each resumed pass has a new companion job, Worker process, and artifact
 directory. Only the Cursor service conversation is reused. Session mismatch,
 expiry, or missing initialization is BLOCKED and never silently starts a new
 conversation. Jobs stopped for Git metadata, workspace-boundary, recursive
-delegation, detached-process, or result-integrity violations cannot be resumed.
+delegation, or result-integrity violations cannot be resumed. Historical jobs
+stopped for detached-process violations also remain ineligible for resume.
 
 The parent reads `run-result.json` first. Full stream and heartbeat output stay on disk. Read referenced logs only when the result is not a clean PASS or requests a major decision.
 
