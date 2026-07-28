@@ -70,6 +70,42 @@ waiting through a persistent terminal session, keep that session open and let
 the companion be the only timeout authority. Do not poll stdin or heartbeat
 artifacts.
 
+In Codex, the blocking unit is the outer `functions.exec` call, not merely the
+Cursor process. If `tools.exec_command` returns a `session_id`, drain that
+terminal inside the same JavaScript evaluation. Do not return the session ID to
+the parent model and issue later `write_stdin` calls; each such return wakes the
+model, rereads context, and spends tokens without advancing the task. The
+internal drain loop below is transport handling within one model-visible call,
+not parent-level polling:
+
+```javascript
+// @exec: {"yield_time_ms": 3610000, "max_output_tokens": 8000}
+// Set the pragma above to the effective timeoutMs plus cleanup grace.
+let result = await tools.exec_command({
+  cmd,
+  workdir,
+  yield_time_ms: 30000,
+  max_output_tokens: 8000,
+})
+let output = result.output || ""
+while (result.session_id !== undefined) {
+  result = await tools.write_stdin({
+    session_id: result.session_id,
+    chars: "",
+    yield_time_ms: 300000,
+    max_output_tokens: 8000,
+  })
+  output = `${output}${result.output || ""}`.slice(-64000)
+}
+text(output)
+```
+
+Do not call `yield_control`, emit intermediate output, or wake the parent only
+to post elapsed-time updates while this loop is active. The visible update sent
+immediately before delegation covers the wait. If the outer tool cannot remain
+blocked for the effective deadline, use `--background` from the start instead
+of switching to model-visible polling.
+
 If the host shell has a hard maximum below the effective timeout, start the
 task with `--background`, return the job ID, and use explicit `status`,
 `result`, or `cancel` commands later. Never shorten the Cursor task to fit the

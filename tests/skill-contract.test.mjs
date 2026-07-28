@@ -42,6 +42,19 @@ test("foreground delegation uses the companion timeout without shortening it", a
   assert.match(skill, /never set it lower than the companion deadline/)
 })
 
+test("Codex keeps persistent-terminal draining inside one model-visible call", async () => {
+  const skill = await readFile(path.join(skillRoot, "SKILL.md"), "utf8")
+  assert.match(skill, /blocking unit is the outer `functions\.exec` call/)
+  assert.match(
+    skill,
+    /```javascript\n\/\/ @exec: \{"yield_time_ms": 3610000, "max_output_tokens": 8000\}/,
+  )
+  assert.match(skill, /while \(result\.session_id !== undefined\)/)
+  assert.match(skill, /yield_time_ms: 300000/)
+  assert.match(skill, /Do not return the session ID to\s+the parent model/)
+  assert.match(skill, /use `--background` from the start/)
+})
+
 test("plugin version metadata stays synchronized", async () => {
   const packageManifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
   const pluginManifest = JSON.parse(
