@@ -635,7 +635,14 @@ async function validateAgentResult(value, requiredChecks, optionalChecks, artifa
       return { valid: false, reason: `agent artifact does not exist: ${artifact.path}` }
     }
     if (!isInside(artifactDir, resolvedArtifact)) {
-      return { valid: false, reason: `agent artifact must be inside artifact directory: ${artifact.path}` }
+      return {
+        valid: false,
+        reason:
+          `agent artifact is outside the delegated artifact directory. `
+          + `Expected root: ${artifactDir}; actual path: ${artifact.path}. `
+          + `Set DELEGATED_TEST_ARTIFACT_DIR and configure the test runner's `
+          + `output/trace directory under that root.`,
+      }
     }
   }
   if (
@@ -759,6 +766,7 @@ function deriveStatus({
 function contractPrompt({
   taskPrompt,
   artifactDir,
+  workerTempDir,
   sourceFingerprint,
   requiredChecks,
   optionalChecks,
@@ -786,6 +794,7 @@ ${workspaceRoots.map((root) => `   - ${root}`).join("\n")}
 6. Never weaken an assertion or locator to hide broken product behavior.
 7. Clean up only resources created by this delegated run.
 8. Prefer the task-specified or repository-provided E2E runner or harness when one exists.
+9. Write every screenshot, trace, report, test-results directory, and custom test output under ${artifactDir}. Do not create a separate output directory under /tmp or another temporary root. The runner has provided DELEGATED_TEST_ARTIFACT_DIR=${artifactDir} and DELEGATED_TEST_TMP_DIR=${workerTempDir}; configure repository test runners to use those paths explicitly when they accept an output-directory option.
 
 Record meaningful progress by appending one JSON object per line to ${workerProgressFile}. Valid events are:
 {"type":"meaningful-progress","kind":"evidence|hypothesis|repair|check-progress|phase-complete","summary":"specific new evidence or completed work"}
@@ -841,6 +850,17 @@ Before exiting, atomically write ${path.join(artifactDir, "agent-result.json")} 
 }
 
 The only valid check status strings are PASS, FAIL, BLOCKED, and SKIP. cleanup is always an object, even when no cleanup was needed. artifacts and blockers are always arrays. Every artifact entry is an object with string path and kind fields, never a bare path string. Use an empty artifacts array when there are no artifacts to report. repair.status is NONE, APPLIED_AND_VERIFIED, or ESCALATION_REQUIRED. Use APPLIED_AND_VERIFIED only after every required check and the affected baseline checks pass.
+
+When repair.status is ESCALATION_REQUIRED, escalation must be a non-null object with exactly the required string fields shown below. Do not use reason in place of code or summary:
+
+{
+  "escalation": {
+    "code": "STABLE_MACHINE_READABLE_CODE",
+    "summary": "Short factual explanation of why escalation is required."
+  }
+}
+
+For repair.status NONE or APPLIED_AND_VERIFIED, use "escalation": null.
 
 Required check IDs:
 ${required}
@@ -1242,6 +1262,12 @@ async function main() {
   if (workspaceRoots.some((root) => artifactDir === root || isInside(root, artifactDir))) {
     throw new Error("Artifact directory must be outside every workspace")
   }
+  const requestedWorkerTempDir = path.join(artifactDir, ".worker-tmp")
+  await mkdir(requestedWorkerTempDir, { recursive: true })
+  const workerTempDir = await realpath(requestedWorkerTempDir)
+  if (workerTempDir === artifactDir || !isInside(artifactDir, workerTempDir)) {
+    throw new Error(`Worker temporary directory must be inside artifact directory: ${workerTempDir}`)
+  }
   await Promise.all(
     ["agent-result.json", "run-result.json", "attempted-repair.patch"].map((name) =>
       rm(path.join(artifactDir, name), { force: true }),
@@ -1286,6 +1312,7 @@ async function main() {
     filesystemBoundaryVerified: config.sandbox === "enabled",
     promptFile,
     artifactDir,
+    workerTempDir,
     runId: config.runId,
     model: config.model,
     timeoutMs: config.timeoutMs,
@@ -1315,6 +1342,7 @@ async function main() {
   const prompt = contractPrompt({
     taskPrompt,
     artifactDir,
+    workerTempDir,
     sourceFingerprint: combinedSourceFingerprint,
     requiredChecks: config.requiredChecks,
     optionalChecks: config.optionalChecks,
@@ -1330,6 +1358,10 @@ async function main() {
     environment: {
       ...process.env,
       DELEGATED_TEST_ARTIFACT_DIR: artifactDir,
+      DELEGATED_TEST_TMP_DIR: workerTempDir,
+      TMPDIR: workerTempDir,
+      TMP: workerTempDir,
+      TEMP: workerTempDir,
       DELEGATED_TEST_WORKSPACE: workspace,
       DELEGATED_TEST_WORKSPACES: JSON.stringify(workspaceRoots),
       DELEGATED_TEST_PROGRESS_FILE: path.join(artifactDir, "worker-progress.jsonl"),

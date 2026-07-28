@@ -85,6 +85,13 @@ async function runFixture(mode, options = {}) {
   if (options.captureAgentArgs) {
     current.agentArgsLog = path.join(current.root, "agent-args.json")
   }
+  if (options.captureAgentEnvironment) {
+    current.agentEnvLog = path.join(current.root, "agent-environment.json")
+  }
+  if (mode === "outside-artifact") {
+    current.externalArtifact = path.join(current.root, "outside-artifact.txt")
+    await writeFile(current.externalArtifact, "outside artifact\n")
+  }
   let exitCode = 0
   let stdout = ""
   let stderr = ""
@@ -97,6 +104,8 @@ async function runFixture(mode, options = {}) {
         FAKE_AGENT_MODE: mode,
         FAKE_REAL_GIT_BIN: realGitBin,
         ...(current.agentArgsLog ? { FAKE_AGENT_ARGV_LOG: current.agentArgsLog } : {}),
+        ...(current.agentEnvLog ? { FAKE_AGENT_ENV_LOG: current.agentEnvLog } : {}),
+        ...(current.externalArtifact ? { FAKE_EXTERNAL_ARTIFACT_PATH: current.externalArtifact } : {}),
       },
     })
     stdout = output.stdout
@@ -137,6 +146,17 @@ test("returns PASS for a clean delegated run", async () => {
   assert.match(await readFile(output.result.logs.progress, "utf8"), /"type":"cursor\.phase"/)
 })
 
+test("tells Cursor the required non-null escalation shape", async () => {
+  const output = await runFixture("pass", { captureAgentArgs: true })
+  assert.equal(output.exitCode, 0)
+  const args = JSON.parse(await readFile(output.agentArgsLog, "utf8"))
+  const prompt = args.join("\n")
+  assert.match(prompt, /When repair\.status is ESCALATION_REQUIRED/)
+  assert.match(prompt, /"code": "STABLE_MACHINE_READABLE_CODE"/)
+  assert.match(prompt, /"summary": "Short factual explanation/)
+  assert.match(prompt, /Do not use reason in place of code or summary/)
+})
+
 test("resumes the requested Cursor session and records explicit lineage", async () => {
   const output = await runFixture("pass", {
     resumeSessionId: "cursor-session-to-resume",
@@ -161,6 +181,19 @@ test("resumes the requested Cursor session and records explicit lineage", async 
     resumed: true,
     resumedFromJobId: "old-job-id",
   })
+})
+
+test("injects a bounded artifact and temporary directory into the Worker", async () => {
+  const output = await runFixture("pass", { captureAgentEnvironment: true })
+  const environment = JSON.parse(await readFile(output.agentEnvLog, "utf8"))
+  const delegation = JSON.parse(await readFile(path.join(output.artifactDir, "delegation.json"), "utf8"))
+  const expectedArtifactDir = fs.realpathSync(output.artifactDir)
+  assert.equal(environment.artifactDir, expectedArtifactDir)
+  assert.equal(environment.delegatedTempDir, path.join(expectedArtifactDir, ".worker-tmp"))
+  for (const name of ["tmpdir", "tmp", "temp"]) {
+    assert.equal(environment[name], environment.delegatedTempDir)
+  }
+  assert.equal(delegation.workerTempDir, environment.delegatedTempDir)
 })
 
 test("fails closed when Cursor resumes a different session", async () => {
@@ -236,6 +269,25 @@ test("returns BLOCKED when Cursor does not produce a structured result", async (
   assert.ok(output.result.reasons.includes("RESULT_INVALID"))
 })
 
+test("accepts an escalation with code and summary", async () => {
+  const output = await runFixture("valid-escalation")
+  assert.equal(output.exitCode, 2)
+  assert.equal(output.result.overall, "FAIL")
+  assert.equal(output.result.validation.valid, true)
+  assert.deepEqual(output.result.escalation, {
+    code: "FAKE_REQUIRED_CHECK_FAILED",
+    summary: "The fake required check needs parent review.",
+  })
+})
+
+test("rejects an escalation that substitutes reason for code and summary", async () => {
+  const output = await runFixture("invalid-escalation-reason")
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.ok(output.result.reasons.includes("RESULT_INVALID"))
+  assert.equal(output.result.validation.reason, "escalation result is missing code or summary")
+})
+
 test("rejects a result that omits a parent-declared required check", async () => {
   const output = await runFixture("pass", { requiredCheck: "missing-check" })
   assert.equal(output.exitCode, 3)
@@ -248,6 +300,15 @@ test("rejects a result that references a missing artifact", async () => {
   assert.equal(output.exitCode, 3)
   assert.equal(output.result.overall, "BLOCKED")
   assert.match(output.result.validation.reason, /agent artifact does not exist/)
+})
+
+test("reports the expected and actual roots when a Worker artifact escapes", async () => {
+  const output = await runFixture("outside-artifact")
+  assert.equal(output.exitCode, 3)
+  assert.equal(output.result.overall, "BLOCKED")
+  assert.match(output.result.validation.reason, /Expected root:/)
+  assert.match(output.result.validation.reason, /actual path:/)
+  assert.match(output.result.validation.reason, /DELEGATED_TEST_ARTIFACT_DIR/)
 })
 
 test("terminates a worker only after no meaningful progress", async () => {

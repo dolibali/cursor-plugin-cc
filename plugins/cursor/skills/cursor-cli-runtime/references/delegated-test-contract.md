@@ -52,6 +52,15 @@ Defaults:
 The artifact directory must be under the system temporary directory and
 outside every declared Git workspace.
 
+The Runner injects `DELEGATED_TEST_ARTIFACT_DIR` as the authoritative output
+root and `DELEGATED_TEST_TMP_DIR` as a Worker-owned temporary subdirectory.
+Worker `TMPDIR`, `TMP`, and `TEMP` are also redirected to that subdirectory so
+standard test tooling does not silently create reports under an unrelated
+temporary directory. Configure a repository test runner's explicit output,
+trace, screenshot, or report directory to `DELEGATED_TEST_ARTIFACT_DIR` (or a
+child of it) when the runner supports such an option. Do not create a separate
+`/tmp/...` artifact directory.
+
 ## Parent session
 
 Immediately before the blocking call, the parent sends a visible conversation
@@ -198,6 +207,21 @@ The Worker atomically writes `<artifact-dir>/agent-result.json` with:
 
 Valid repair statuses are `NONE`, `APPLIED_AND_VERIFIED`, and `ESCALATION_REQUIRED`.
 
+When `repair.status` is `ESCALATION_REQUIRED`, `escalation` must be a non-null
+object with stable machine-readable `code` and factual `summary` string fields:
+
+```json
+{
+  "escalation": {
+    "code": "STABLE_MACHINE_READABLE_CODE",
+    "summary": "Short factual explanation of why escalation is required."
+  }
+}
+```
+
+For `NONE` and `APPLIED_AND_VERIFIED`, use `"escalation": null`. Do not use a
+`reason` field as a substitute for `code` or `summary`.
+
 The Runner derives the authoritative `overall` status. Cursor prose does not override checks, cleanup, process exit, recursion guard, Git workspace guard, fingerprints, or result validation.
 When Cursor emits usage counters, `run-result.json` also records input, output, cache-read, and cache-write tokens so delegated cost can be measured without reading the raw stream.
 
@@ -233,6 +257,12 @@ delegation, or result-integrity violations cannot be resumed. Historical jobs
 stopped for detached-process violations also remain ineligible for resume.
 
 The parent reads `run-result.json` first. Full stream and heartbeat output stay on disk. Read referenced logs only when the result is not a clean PASS or requests a major decision.
+
+If a Worker reports an artifact outside the delegated root, the Runner returns
+`BLOCKED` with the expected root, actual path, and the
+`DELEGATED_TEST_ARTIFACT_DIR` remediation. Treat that as an artifact-contract
+failure, not as a product failure; reconfigure the test output path and rerun
+with a fresh artifact directory.
 
 For E2E tasks, apply the parent skill's post-task change check regardless of whether the final status is PASS, PARTIAL, BLOCKED, or FAIL. Start with the diff and the compact checks, repair iterations, and progress summaries in `run-result.json`; open only a specifically referenced artifact when the reason for a change is still unclear, and do not read full event streams or logs by default.
 

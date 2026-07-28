@@ -19,6 +19,18 @@ const workspace = process.env.DELEGATED_TEST_WORKSPACE
 const workspaces = JSON.parse(process.env.DELEGATED_TEST_WORKSPACES ?? `["${workspace}"]`)
 const mode = process.env.FAKE_AGENT_MODE ?? "pass"
 const progressFile = process.env.DELEGATED_TEST_PROGRESS_FILE
+if (process.env.FAKE_AGENT_ENV_LOG) {
+  await writeFile(
+    process.env.FAKE_AGENT_ENV_LOG,
+    `${JSON.stringify({
+      artifactDir,
+      delegatedTempDir: process.env.DELEGATED_TEST_TMP_DIR,
+      tmpdir: process.env.TMPDIR,
+      tmp: process.env.TMP,
+      temp: process.env.TEMP,
+    })}\n`,
+  )
+}
 const resumeIndex = args.indexOf("--resume")
 const requestedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : null
 const defaultSessionId = process.env.FAKE_CURSOR_SESSION_ID ?? "fake-cursor-session"
@@ -259,9 +271,30 @@ result.recursionGuard = {
   blockedAttempts: mode === "path-recursion" || mode === "nested-agent" ? 1 : 0,
 }
 result.escalation = null
+if (mode === "valid-escalation" || mode === "invalid-escalation-reason") {
+  result.checks[0].status = "FAIL"
+  result.repair = {
+    status: "ESCALATION_REQUIRED",
+    iterations: [],
+  }
+  result.escalation = mode === "valid-escalation"
+    ? {
+        code: "FAKE_REQUIRED_CHECK_FAILED",
+        summary: "The fake required check needs parent review.",
+      }
+    : {
+        reason: "The fake required check needs parent review.",
+      }
+}
 if (mode === "missing-artifact") {
   result.artifacts.push({
     path: path.join(artifactDir, "missing-screenshot.png"),
+    kind: "screenshot",
+  })
+}
+if (mode === "outside-artifact") {
+  result.artifacts.push({
+    path: process.env.FAKE_EXTERNAL_ARTIFACT_PATH,
     kind: "screenshot",
   })
 }
