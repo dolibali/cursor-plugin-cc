@@ -785,6 +785,7 @@ ${workspaceRoots.map((root) => `   - ${root}`).join("\n")}
 5. Do not commit, push, reset, checkout, clean, rebase, stash, or edit any undeclared repository.
 6. Never weaken an assertion or locator to hide broken product behavior.
 7. Clean up only resources created by this delegated run.
+8. Prefer the task-specified or repository-provided E2E runner or harness when one exists.
 
 Record meaningful progress by appending one JSON object per line to ${workerProgressFile}. Valid events are:
 {"type":"meaningful-progress","kind":"evidence|hypothesis|repair|check-progress|phase-complete","summary":"specific new evidence or completed work"}
