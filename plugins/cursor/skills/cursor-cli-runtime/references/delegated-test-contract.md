@@ -40,6 +40,33 @@ session. Primary workspace, add-dir set, sandbox, and model must match. The
 companion never chooses a recent job automatically and never falls back to a
 new Cursor conversation when resume fails.
 
+## Rerun Cost And Runtime Reuse
+
+The Worker keeps the full acceptance flow intact and optimizes only setup and
+rerun scope. A resumed pass gets a new artifact directory for evidence, but it
+should reuse the same suite profile and application window whenever they are
+healthy.
+
+Classify the changed surface before a rerun:
+
+- Test, external fixture, locator, or runner-only changes: reuse the installed
+  runtime artifact and current profile/window; rerun the affected test without
+  a rebuild or reinstall. A fixture bundled into the runtime artifact follows
+  the product-bundle rule below.
+- Product bundle changes: rebuild or reinstall once, then perform one
+  controlled reload in the current profile/window.
+- Runtime, dependency, or service changes: rebuild only the affected layer
+  when the repository runner supports it, and relaunch only when required for
+  the changed process.
+- Profile corruption or process-identity failure: recreate only the affected
+  isolated runtime after collecting the failure evidence.
+
+Do not repeat an identical long command when its inputs are unchanged. Batch
+known test and product repairs before the next expensive GUI pass, and record
+the reason when a build, reinstall, profile recreation, or relaunch is needed.
+Do not use Stop or Cancel merely to reduce test time; model-backed or otherwise
+long-running scenarios must complete according to their acceptance checks.
+
 Defaults:
 
 - model: `auto` by default; override with `--model` / env / config;

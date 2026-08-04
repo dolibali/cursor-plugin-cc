@@ -172,6 +172,34 @@ node "$COMPANION" task --mode e2e \
 Each resumed E2E Worker must use a new artifact directory. E2E security or
 result-integrity violations make the source job ineligible for continuation.
 
+### E2E rerun cost policy
+
+Treat validation and repair passes for one development goal as one runtime
+session. A new artifact directory is required for evidence isolation, but it
+does not by itself require rebuilding the product, recreating the profile, or
+relaunching the application.
+
+- Test, external fixture, locator, or runner-only changes reuse the already
+  verified runtime artifact and the existing profile/window. Rerun the
+  affected test directly. A fixture bundled into the runtime artifact follows
+  the product-bundle rule below.
+- Product bundle changes rebuild or reinstall once, then reload the existing
+  profile/window. Do not repeat first-run bootstrap or recreate unrelated
+  test state.
+- Runtime, dependency, or service changes rebuild only the affected artifact
+  when the repository runner supports that boundary; relaunch only when the
+  loaded process cannot observe the change.
+- Before repeating a long command, compare its relevant inputs with the last
+  successful invocation. Do not run an identical build or package command when
+  those inputs have not changed.
+- Batch known repairs before the next expensive GUI pass. A test-only repair
+  must not trigger a product rebuild, and a product repair must not trigger a
+  fresh profile unless the profile itself is the failure.
+
+This policy changes setup and rerun scope only. It does not shorten the
+acceptance flow or interrupt a long-running application/model scenario; the
+delegated test still completes the user-visible flow defined by its checks.
+
 ## Recursion guard
 
 When `CURSOR_DELEGATED_WORKER=1` or `CURSOR_DELEGATION_DEPTH>=1`, execute the
